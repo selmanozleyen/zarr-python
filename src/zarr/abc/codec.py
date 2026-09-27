@@ -15,12 +15,16 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
     from typing import Self
 
+    import numpy as np
+    import numpy.typing as npt
+
     from zarr.abc.store import ByteGetter, ByteSetter, Store
     from zarr.core.array_spec import ArraySpec
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar, ZDType
     from zarr.core.indexing import SelectorTuple
     from zarr.core.metadata import ArrayMetadata
     from zarr.core.metadata.v3 import ChunkGridMetadata
+    from zarr.storage import StorePath
 
 __all__ = [
     "ArrayArrayCodec",
@@ -483,6 +487,41 @@ class CodecPipeline:
             One result per chunk in ``batch_info``.
         """
         ...
+
+    async def read_ranges(
+        self,
+        store_path: StorePath,
+        metadata: ArrayMetadata,
+        starts: npt.NDArray[np.int64],
+        lengths: npt.NDArray[np.int64],
+        out: NDBuffer,
+    ) -> bool:
+        """Reads ranges of the first axis, back to back, into ``out``, if this pipeline has a
+        faster way than chunk projections. Optional.
+
+        Range ``i`` is ``starts[i] : starts[i] + lengths[i]`` on axis 0, with every other axis
+        whole; ``out`` holds the ranges one after another. The ranges are nonempty and in
+        bounds, and none starts where the previous one ended. Returns ``False``, without
+        writing ``out``, to have the array read them through `RangeIndexer` and `read`
+        instead, which is what this default does.
+
+        Parameters
+        ----------
+        store_path : StorePath
+            The array's location.
+        metadata : ArrayMetadata
+            The array's metadata.
+        starts, lengths : np.ndarray
+            The ranges, as int64 arrays of equal length.
+        out : NDBuffer
+            The output, of shape ``(sum(lengths), *metadata.shape[1:])``.
+
+        Returns
+        -------
+        bool
+            Whether ``out`` now holds the ranges.
+        """
+        return False
 
     @abstractmethod
     async def write(
