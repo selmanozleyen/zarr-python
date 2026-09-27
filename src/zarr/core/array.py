@@ -100,6 +100,7 @@ from zarr.core.indexing import (
     OIndex,
     OrthogonalIndexer,
     OrthogonalSelection,
+    RangeIndexer,
     Selection,
     VIndex,
     _iter_grid,
@@ -1579,6 +1580,54 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             fields=fields,
             prototype=prototype,
         )
+
+    async def get_range_selection(
+        self,
+        starts: npt.ArrayLike,
+        lengths: npt.ArrayLike,
+        *,
+        out: NDBuffer | None = None,
+        prototype: BufferPrototype | None = None,
+    ) -> NDArrayLikeOrScalar:
+        """Ranges of the first axis, every other axis whole, read back to back.
+
+        Range ``i`` is ``starts[i] : starts[i] + lengths[i]`` on axis 0; the result holds the
+        ranges one after another in the order given, with shape
+        ``(sum(lengths), *shape[1:])``. Ranges may overlap, repeat and come in any order. The
+        codec pipeline reads them directly if it implements `CodecPipeline.read_ranges`, and
+        through `RangeIndexer` otherwise.
+
+        Parameters
+        ----------
+        starts, lengths : array-like
+            One-dimensional integer arrays of equal length.
+        out : NDBuffer, optional
+            A buffer of the result's shape to read into.
+        prototype : BufferPrototype, optional
+            A buffer prototype to use for the retrieved data.
+
+        Returns
+        -------
+        NDArrayLikeOrScalar
+            The ranges, back to back.
+        """
+        if prototype is None:
+            prototype = default_buffer_prototype()
+        indexer = RangeIndexer(starts, lengths, self.metadata.shape, self._chunk_grid)
+        if out is None:
+            order = self.metadata.order if self.metadata.zarr_format == 2 else self.config.order
+            out = prototype.nd_buffer.empty(
+                shape=indexer.shape, dtype=self.metadata.dtype.to_native_dtype(), order=order
+            )
+        elif out.shape != indexer.shape:
+            raise ValueError(
+                f"shape of out argument doesn't match. Expected {indexer.shape}, got {out.shape}"
+            )
+        if indexer.starts.size and await self.codec_pipeline.read_ranges(
+            self.store_path, self.metadata, indexer.starts, indexer.lengths, out
+        ):
+            return out.as_ndarray_like()
+        return await self._get_selection(indexer, prototype=prototype, out=out)
 
     async def get_coordinate_selection(
         self,
@@ -3565,6 +3614,46 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             # restore shape
             out_array = np.array(out_array).reshape(indexer.sel_shape)
         return out_array
+
+    def get_range_selection(
+        self,
+        starts: npt.ArrayLike,
+        lengths: npt.ArrayLike,
+        *,
+        out: NDBuffer | None = None,
+        prototype: BufferPrototype | None = None,
+    ) -> NDArrayLikeOrScalar:
+        """Ranges of the first axis, every other axis whole, read back to back.
+
+        Range ``i`` is ``starts[i] : starts[i] + lengths[i]`` on axis 0; the result holds the
+        ranges one after another in the order given, with shape
+        ``(sum(lengths), *shape[1:])``. Ranges may overlap, repeat and come in any order.
+
+        Parameters
+        ----------
+        starts, lengths : array-like
+            One-dimensional integer arrays of equal length.
+        out : NDBuffer, optional
+            A buffer of the result's shape to read into.
+        prototype : BufferPrototype, optional
+            A buffer prototype to use for the retrieved data.
+
+        Returns
+        -------
+        NDArrayLikeOrScalar
+            The ranges, back to back.
+
+        Examples
+        --------
+        >>> import zarr
+        >>> z = zarr.create_array(store={}, shape=(10,), chunks=(4,), dtype="i4")
+        >>> z[:] = range(10)
+        >>> z.get_range_selection([7, 1], [2, 3])
+        array([7, 8, 1, 2, 3], dtype=int32)
+        """
+        return sync(
+            self.async_array.get_range_selection(starts, lengths, out=out, prototype=prototype)
+        )
 
     def set_coordinate_selection(
         self,

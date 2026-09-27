@@ -622,6 +622,97 @@ class BasicIndexer(Indexer):
 
 
 @dataclass(frozen=True)
+class RangeIndexer(Indexer):
+    """Ranges of the first axis, the other axes whole, read back to back into one output.
+
+    Range ``i`` is ``starts[i] : starts[i] + lengths[i]`` on axis 0. The output holds the ranges
+    one after another in the order given, so its first extent is ``sum(lengths)``. Ranges may
+    come in any order, overlap or repeat. A range that starts where the previous one ended is
+    merged into it first, so consecutive rows cost one projection per chunk, not one per row.
+    The work is per range and per chunk crossed, never per element.
+
+    Parameters
+    ----------
+    starts, lengths
+        One-dimensional integer arrays of equal length.
+    shape
+        The array shape.
+    chunk_grid
+        The array's chunk grid.
+    """
+
+    starts: npt.NDArray[np.int64]
+    lengths: npt.NDArray[np.int64]
+    out_starts: npt.NDArray[np.int64]
+    trailing: list[SliceDimIndexer]
+    dim_grid: DimensionGrid
+    shape: tuple[int, ...]
+    drop_axes: tuple[int, ...]
+
+    def __init__(
+        self,
+        starts: npt.ArrayLike,
+        lengths: npt.ArrayLike,
+        shape: tuple[int, ...],
+        chunk_grid: ChunkGrid,
+    ) -> None:
+        if len(shape) == 0:
+            raise IndexError("range selection needs an array with at least one dimension")
+        starts = np.asarray(starts)
+        lengths = np.asarray(lengths)
+        if starts.ndim != 1 or starts.shape != lengths.shape:
+            raise IndexError("starts and lengths must be one-dimensional and of equal length")
+        if starts.size and not (is_integer_array(starts) and is_integer_array(lengths)):
+            raise IndexError("starts and lengths must be integer arrays")
+        starts = starts.astype(np.int64, copy=False)
+        lengths = lengths.astype(np.int64, copy=False)
+        if (lengths < 0).any() or (starts < 0).any() or (starts + lengths > shape[0]).any():
+            raise BoundsCheckError(f"a range falls outside axis 0, which has length {shape[0]}")
+        keep = lengths > 0
+        starts, lengths = starts[keep], lengths[keep]
+        if starts.size:
+            # A range continuing the previous one is the same read.
+            first = np.ones(starts.size, dtype=bool)
+            first[1:] = starts[1:] != starts[:-1] + lengths[:-1]
+            heads = np.flatnonzero(first)
+            starts, lengths = starts[heads], np.add.reduceat(lengths, heads)
+        out_starts = np.concatenate(([0], np.cumsum(lengths)[:-1])).astype(np.int64)
+        dim_grids = chunk_grid._dimensions
+        trailing = [
+            SliceDimIndexer(slice(None), dim_len, dim_grid)
+            for dim_len, dim_grid in zip(shape[1:], dim_grids[1:], strict=True)
+        ]
+        object.__setattr__(self, "starts", starts)
+        object.__setattr__(self, "lengths", lengths)
+        object.__setattr__(self, "out_starts", out_starts)
+        object.__setattr__(self, "trailing", trailing)
+        object.__setattr__(self, "dim_grid", dim_grids[0])
+        object.__setattr__(self, "shape", (int(lengths.sum()), *shape[1:]))
+        object.__setattr__(self, "drop_axes", ())
+
+    def __iter__(self) -> Iterator[ChunkProjection]:
+        g = self.dim_grid
+        trailing = list(itertools.product(*self.trailing))
+        for start, length, out in zip(
+            self.starts.tolist(), self.lengths.tolist(), self.out_starts.tolist(), strict=True
+        ):
+            stop = start + length
+            for ix in range(g.index_to_chunk(start), g.index_to_chunk(stop - 1) + 1):
+                offset, size = g.chunk_offset(ix), g.data_size(ix)
+                lo, hi = max(start, offset), min(stop, offset + size)
+                sel = slice(lo - offset, hi - offset)
+                out_sel = slice(out + lo - start, out + hi - start)
+                whole = lo == offset and hi == offset + size
+                for dims in trailing:
+                    yield ChunkProjection(
+                        (ix, *(p.dim_chunk_ix for p in dims)),
+                        (sel, *(p.dim_chunk_sel for p in dims)),
+                        (out_sel, *(p.dim_out_sel for p in dims)),
+                        whole and all(p.is_complete_chunk for p in dims),
+                    )
+
+
+@dataclass(frozen=True)
 class BoolArrayDimIndexer:
     dim_sel: npt.NDArray[np.bool_]
     dim_len: int
