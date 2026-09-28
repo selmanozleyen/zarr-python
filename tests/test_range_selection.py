@@ -120,14 +120,13 @@ def test_indexer_merges_touching_ranges() -> None:
 def test_pipeline_hook_serves_the_read(
     arr_1d: tuple[zarr.Array[Any], np.ndarray], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A pipeline that implements the hook is handed the merged ranges and reads them itself."""
+    """A pipeline that overrides the hook is handed the merged ranges and reads them itself."""
     a, _ = arr_1d
     calls: list[tuple[list[int], list[int]]] = []
 
-    async def read_ranges(self, store_path, metadata, starts, lengths, out) -> bool:  # type: ignore[no-untyped-def]
+    async def read_ranges(self, store_path, metadata, starts, lengths, out, **kwargs) -> None:  # type: ignore[no-untyped-def]
         calls.append((starts.tolist(), lengths.tolist()))
         out.as_ndarray_like()[...] = -1
-        return True
 
     monkeypatch.setattr(type(a.async_array.codec_pipeline), "read_ranges", read_ranges)
     got = a.get_range_selection([10, 15, 40], [5, 5, 2])
@@ -135,29 +134,37 @@ def test_pipeline_hook_serves_the_read(
     assert_array_equal(got, np.full(12, -1))
 
 
-def test_pipeline_hook_can_decline(
+def test_pipeline_hook_can_defer_to_the_default(
     arr_1d: tuple[zarr.Array[Any], np.ndarray], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """An override that does not serve an array calls the base method, which reads it."""
     a, values = arr_1d
     calls = []
 
-    async def read_ranges(self, *args: Any) -> bool:  # type: ignore[no-untyped-def]
+    async def read_ranges(self, *args: Any, **kwargs: Any) -> None:  # type: ignore[no-untyped-def]
         calls.append(1)
-        return False
+        await CodecPipeline.read_ranges(self, *args, **kwargs)
 
     monkeypatch.setattr(type(a.async_array.codec_pipeline), "read_ranges", read_ranges)
-    assert_array_equal(a.get_range_selection([5], [10]), values[5:15])
+    assert_array_equal(a.get_range_selection([5, 30], [10, 3]), expected(values, [5, 30], [10, 3]))
     assert calls == [1]
 
 
-def test_default_hook_declines() -> None:
-    assert CodecPipeline.read_ranges.__qualname__ == "CodecPipeline.read_ranges"
-    a = zarr.create_array(store={}, shape=(4,), chunks=(2,), dtype="u1")
+def test_default_hook_reads_the_ranges(arr_1d: tuple[zarr.Array[Any], np.ndarray]) -> None:
+    a, values = arr_1d
     pipeline = a.async_array.codec_pipeline
-    out = default_buffer_prototype().nd_buffer.empty(shape=(2,), dtype=np.dtype("u1"))
-    served = sync(
+    out = default_buffer_prototype().nd_buffer.empty(shape=(7,), dtype=np.dtype("i4"))
+    sync(
         CodecPipeline.read_ranges(
-            pipeline, a.store_path, a.metadata, np.array([0]), np.array([2]), out
+            pipeline,
+            a.store_path,
+            a.metadata,
+            np.array([90, 3]),
+            np.array([4, 3]),
+            out,
+            config=a.async_array.config,
+            chunk_grid=a._chunk_grid,
+            prototype=default_buffer_prototype(),
         )
     )
-    assert served is False
+    assert_array_equal(out.as_ndarray_like(), expected(values, [90, 3], [4, 3]))

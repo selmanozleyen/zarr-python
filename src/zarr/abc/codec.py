@@ -19,6 +19,9 @@ if TYPE_CHECKING:
     import numpy.typing as npt
 
     from zarr.abc.store import ByteGetter, ByteSetter, Store
+    from zarr.core.array_spec import ArrayConfig
+    from zarr.core.buffer import BufferPrototype
+    from zarr.core.chunk_grids import ChunkGrid
     from zarr.core.array_spec import ArraySpec
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar, ZDType
     from zarr.core.indexing import SelectorTuple
@@ -495,15 +498,20 @@ class CodecPipeline:
         starts: npt.NDArray[np.int64],
         lengths: npt.NDArray[np.int64],
         out: NDBuffer,
-    ) -> bool:
-        """Reads ranges of the first axis, back to back, into ``out``, if this pipeline has a
-        faster way than chunk projections. Optional.
+        *,
+        config: ArrayConfig,
+        chunk_grid: ChunkGrid,
+        prototype: BufferPrototype,
+    ) -> None:
+        """Reads ranges of the first axis, back to back, into ``out``.
 
         Range ``i`` is ``starts[i] : starts[i] + lengths[i]`` on axis 0, with every other axis
         whole; ``out`` holds the ranges one after another. The ranges are nonempty and in
-        bounds, and none starts where the previous one ended. Returns ``False``, without
-        writing ``out``, to have the array read them through `RangeIndexer` and `read`
-        instead, which is what this default does.
+        bounds, and none starts where the previous one ended.
+
+        This default reads them through `RangeIndexer` and `read`, so every pipeline serves
+        them. A pipeline with a faster way overrides it, and calls this for arrays it does not
+        serve, the way a store overrides `Store.get_ranges`.
 
         Parameters
         ----------
@@ -515,13 +523,20 @@ class CodecPipeline:
             The ranges, as int64 arrays of equal length.
         out : NDBuffer
             The output, of shape ``(sum(lengths), *metadata.shape[1:])``.
-
-        Returns
-        -------
-        bool
-            Whether ``out`` now holds the ranges.
+        config : ArrayConfig
+            The array's runtime configuration.
+        chunk_grid : ChunkGrid
+            The array's chunk grid.
+        prototype : BufferPrototype
+            The buffer prototype for the chunks read.
         """
-        return False
+        from zarr.core.array import _get_selection
+        from zarr.core.indexing import RangeIndexer
+
+        indexer = RangeIndexer(starts, lengths, metadata.shape, chunk_grid)
+        await _get_selection(
+            store_path, metadata, self, config, chunk_grid, indexer, prototype=prototype, out=out
+        )
 
     @abstractmethod
     async def write(

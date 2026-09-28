@@ -1594,8 +1594,8 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         Range ``i`` is ``starts[i] : starts[i] + lengths[i]`` on axis 0; the result holds the
         ranges one after another in the order given, with shape
         ``(sum(lengths), *shape[1:])``. Ranges may overlap, repeat and come in any order. The
-        codec pipeline reads them directly if it implements `CodecPipeline.read_ranges`, and
-        through `RangeIndexer` otherwise.
+        codec pipeline reads them through `CodecPipeline.read_ranges`, whose default goes
+        through `RangeIndexer`.
 
         Parameters
         ----------
@@ -1623,11 +1623,18 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             raise ValueError(
                 f"shape of out argument doesn't match. Expected {indexer.shape}, got {out.shape}"
             )
-        if indexer.starts.size and await self.codec_pipeline.read_ranges(
-            self.store_path, self.metadata, indexer.starts, indexer.lengths, out
-        ):
-            return out.as_ndarray_like()
-        return await self._get_selection(indexer, prototype=prototype, out=out)
+        if indexer.starts.size:
+            await self.codec_pipeline.read_ranges(
+                self.store_path,
+                self.metadata,
+                indexer.starts,
+                indexer.lengths,
+                out,
+                config=self.config,
+                chunk_grid=self._chunk_grid,
+                prototype=prototype,
+            )
+        return out.as_ndarray_like()
 
     async def get_coordinate_selection(
         self,
