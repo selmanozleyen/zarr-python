@@ -189,7 +189,6 @@ def served_2d(monkeypatch: pytest.MonkeyPatch) -> tuple[zarr.Array[Any], np.ndar
         np.s_[3, 1:7],
         np.s_[..., 2],
         np.s_[-1, :],
-        np.s_[4:4, :],
     ],
 )
 def test_basic_reads_go_through_read_runs(
@@ -219,7 +218,7 @@ def test_orthogonal_reads_go_through_read_runs(
     assert calls == [1]
 
 
-@pytest.mark.parametrize("selection", [np.s_[::2, :], np.s_[3, 4]])
+@pytest.mark.parametrize("selection", [np.s_[::2, :], np.s_[3, 4], np.s_[4:4, :]])
 def test_other_reads_keep_their_path(
     served_2d: tuple[zarr.Array[Any], np.ndarray, list[int]], selection: Any
 ) -> None:
