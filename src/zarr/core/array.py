@@ -1602,7 +1602,7 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         prototype: BufferPrototype | None,
     ) -> NDArrayLikeOrScalar | None:
         # Only a pipeline with its own read_runs gains; the default would split per run.
-        if fields is not None or type(self.codec_pipeline).read_runs is CodecPipeline.read_runs:
+        if fields or type(self.codec_pipeline).read_runs is CodecPipeline.read_runs:
             return None
         converted = runs_of_selection(selection, self.metadata.shape, arrays=arrays)
         if converted is None:
