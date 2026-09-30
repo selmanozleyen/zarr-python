@@ -1589,28 +1589,6 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         out: NDBuffer | None = None,
         prototype: BufferPrototype | None = None,
     ) -> NDArrayLikeOrScalar:
-        """Ranges of the first axis, every other axis whole, read back to back.
-
-        Range ``i`` is ``starts[i] : starts[i] + lengths[i]`` on axis 0; the result holds the
-        ranges one after another in the order given, with shape
-        ``(sum(lengths), *shape[1:])``. Ranges may overlap, repeat and come in any order. The
-        codec pipeline reads them through `CodecPipeline.read_ranges`, whose default goes
-        through `RangeIndexer`.
-
-        Parameters
-        ----------
-        starts, lengths : array-like
-            One-dimensional integer arrays of equal length.
-        out : NDBuffer, optional
-            A buffer of the result's shape to read into.
-        prototype : BufferPrototype, optional
-            A buffer prototype to use for the retrieved data.
-
-        Returns
-        -------
-        NDArrayLikeOrScalar
-            The ranges, back to back.
-        """
         if prototype is None:
             prototype = default_buffer_prototype()
         indexer = RangeIndexer(starts, lengths, self.metadata.shape, self._chunk_grid)
@@ -3630,20 +3608,19 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         out: NDBuffer | None = None,
         prototype: BufferPrototype | None = None,
     ) -> NDArrayLikeOrScalar:
-        """Ranges of the first axis, every other axis whole, read back to back.
+        """Get ranges of the first axis, other axes whole, back to back.
 
-        Range ``i`` is ``starts[i] : starts[i] + lengths[i]`` on axis 0; the result holds the
-        ranges one after another in the order given, with shape
-        ``(sum(lengths), *shape[1:])``. Ranges may overlap, repeat and come in any order.
+        Range ``i`` is ``starts[i] : starts[i] + lengths[i]``; ranges may overlap, repeat and
+        come in any order. The result has shape ``(sum(lengths), *shape[1:])``.
 
         Parameters
         ----------
         starts, lengths : array-like
             One-dimensional integer arrays of equal length.
         out : NDBuffer, optional
-            A buffer of the result's shape to read into.
+            If given, load the selected data directly into this buffer.
         prototype : BufferPrototype, optional
-            A buffer prototype to use for the retrieved data.
+            The prototype of the buffer to use for the output data.
 
         Returns
         -------
