@@ -164,3 +164,71 @@ def test_run_selection_refusals(arr_1d: tuple[zarr.Array[Any], np.ndarray]) -> N
         a.get_run_selection((slice(0, 10, 2),))
     with pytest.raises(IndexError, match="too many axes"):
         a.get_run_selection((slice(None), slice(None)))
+
+
+@pytest.fixture
+def served_2d(monkeypatch: pytest.MonkeyPatch) -> tuple[zarr.Array[Any], np.ndarray, list[int]]:
+    """A 2-D array whose pipeline overrides read_runs, counting the calls."""
+    values = np.arange(12 * 10, dtype="i4").reshape(12, 10)
+    a = zarr.create_array(store={}, shape=values.shape, chunks=(5, 4), dtype="i4")
+    a[:] = values
+    calls: list[int] = []
+
+    async def read_runs(self, *args: Any, **kwargs: Any) -> None:  # type: ignore[no-untyped-def]
+        calls.append(1)
+        await CodecPipeline.read_runs(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(a.async_array.codec_pipeline), "read_runs", read_runs)
+    return a, values, calls
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        np.s_[2:5, 1:7],
+        np.s_[3, 1:7],
+        np.s_[..., 2],
+        np.s_[-1, :],
+        np.s_[4:4, :],
+    ],
+)
+def test_basic_reads_go_through_read_runs(
+    served_2d: tuple[zarr.Array[Any], np.ndarray, list[int]], selection: Any
+) -> None:
+    a, values, calls = served_2d
+    assert_array_equal(a[selection], values[selection])
+    assert calls == [1]
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        ([5, 1, 2, 3], slice(2, 4)),
+        ([-1, 0, 0], [3, 1]),
+        (np.arange(12) % 3 == 0, [0, 9]),
+        (7, [2, 3, 4]),
+    ],
+)
+def test_orthogonal_reads_go_through_read_runs(
+    served_2d: tuple[zarr.Array[Any], np.ndarray, list[int]], selection: Any
+) -> None:
+    a, values, calls = served_2d
+    rows, cols = (np.arange(n)[s] if not isinstance(s, int) else s for s, n in zip(selection, values.shape))
+    want = values[rows][:, cols] if not isinstance(rows, int) else values[rows][cols]
+    assert_array_equal(a.oindex[selection], want)
+    assert calls == [1]
+
+
+@pytest.mark.parametrize("selection", [np.s_[::2, :], np.s_[3, 4]])
+def test_other_reads_keep_their_path(
+    served_2d: tuple[zarr.Array[Any], np.ndarray, list[int]], selection: Any
+) -> None:
+    a, values, calls = served_2d
+    assert_array_equal(a[selection], values[selection])
+    assert calls == []
+
+
+def test_no_dispatch_without_an_override() -> None:
+    a = zarr.create_array(store={}, shape=(8, 8), chunks=(4, 4), dtype="u1")
+    assert type(a.async_array.codec_pipeline).read_runs is CodecPipeline.read_runs
+    assert_array_equal(a[1:3, 2:5], np.zeros((2, 3), dtype="u1"))

@@ -22,7 +22,7 @@ import numpy as np
 from typing_extensions import Sentinel, deprecated
 
 import zarr
-from zarr.abc.codec import ArrayArrayCodec, ArrayBytesCodec, BytesBytesCodec, Codec
+from zarr.abc.codec import ArrayArrayCodec, ArrayBytesCodec, BytesBytesCodec, Codec, CodecPipeline
 from zarr.abc.numcodec import Numcodec, _is_numcodec
 from zarr.codecs._v2 import V2Codec
 from zarr.codecs.bytes import BytesCodec
@@ -102,6 +102,7 @@ from zarr.core.indexing import (
     OrthogonalSelection,
     RunIndexer,
     RunSelection,
+    runs_of_selection,
     Selection,
     VIndex,
     _iter_grid,
@@ -157,7 +158,6 @@ if TYPE_CHECKING:
 
     import numpy.typing as npt
 
-    from zarr.abc.codec import CodecPipeline
     from zarr.abc.store import Store
     from zarr.codecs.sharding import IndexLocation, ShardingCodec
     from zarr.core.dtype.wrapper import TBaseDType, TBaseScalar
@@ -1526,6 +1526,11 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         np.int32(0)
         """
 
+        got = await self._get_as_runs(
+            selection, arrays=False, out=None, fields=None, prototype=prototype
+        )
+        if got is not None:
+            return got
         return await _getitem(
             self.store_path,
             self.metadata,
@@ -1544,6 +1549,11 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         fields: Fields | None = None,
         prototype: BufferPrototype | None = None,
     ) -> NDArrayLikeOrScalar:
+        got = await self._get_as_runs(
+            selection, arrays=True, out=out, fields=fields, prototype=prototype
+        )
+        if got is not None:
+            return got
         if prototype is None:
             prototype = default_buffer_prototype()
         indexer = OrthogonalIndexer(selection, self.metadata.shape, self._chunk_grid)
@@ -1581,6 +1591,38 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             fields=fields,
             prototype=prototype,
         )
+
+    async def _get_as_runs(
+        self,
+        selection: Any,
+        *,
+        arrays: bool,
+        out: NDBuffer | None,
+        fields: Fields | None,
+        prototype: BufferPrototype | None,
+    ) -> NDArrayLikeOrScalar | None:
+        # Only a pipeline with its own read_runs gains; the default would split per run.
+        if fields is not None or type(self.codec_pipeline).read_runs is CodecPipeline.read_runs:
+            return None
+        converted = runs_of_selection(selection, self.metadata.shape, arrays=arrays)
+        if converted is None:
+            return None
+        runs, drop_axes = converted
+        if not drop_axes:
+            return await self.get_run_selection(runs, out=out, prototype=prototype)
+        if prototype is None:
+            prototype = default_buffer_prototype()
+        indexer = RunIndexer(runs, self.metadata.shape, self._chunk_grid)
+        shape = tuple(n for axis, n in enumerate(indexer.shape) if axis not in drop_axes)
+        if out is None:
+            order = self.metadata.order if self.metadata.zarr_format == 2 else self.config.order
+            out = prototype.nd_buffer.empty(
+                shape=shape, dtype=self.metadata.dtype.to_native_dtype(), order=order
+            )
+        elif out.shape != shape:
+            raise ValueError(f"shape of out argument doesn't match. Expected {shape}, got {out.shape}")
+        await self.get_run_selection(runs, out=out.reshape(indexer.shape), prototype=prototype)
+        return out.as_ndarray_like()
 
     async def get_run_selection(
         self,
@@ -2975,6 +3017,13 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
 
         """
 
+        got = sync(
+            self.async_array._get_as_runs(
+                selection, arrays=False, out=out, fields=fields, prototype=prototype
+            )
+        )
+        if got is not None:
+            return got
         if prototype is None:
             prototype = default_buffer_prototype()
         return sync(
@@ -3212,6 +3261,13 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         [__setitem__][zarr.Array.__setitem__]
 
         """
+        got = sync(
+            self.async_array._get_as_runs(
+                selection, arrays=True, out=out, fields=fields, prototype=prototype
+            )
+        )
+        if got is not None:
+            return got
         if prototype is None:
             prototype = default_buffer_prototype()
         indexer = OrthogonalIndexer(selection, self.shape, self._chunk_grid)

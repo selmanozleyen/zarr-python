@@ -675,6 +675,44 @@ def _run_pieces(
     return pieces
 
 
+def runs_of_selection(
+    selection: Any, shape: tuple[int, ...], *, arrays: bool
+) -> tuple[RunSelection, tuple[int, ...]] | None:
+    """The selection as runs per axis and the axes an integer drops, or None if it isn't one.
+
+    Integers, step-1 slices and, with ``arrays``, 1-D integer or boolean arrays qualify.
+    """
+    try:
+        selection = replace_ellipsis(selection, shape)
+    except IndexError:
+        return None
+    if len(selection) != len(shape):
+        return None
+    runs, drop_axes = [], []
+    for axis, (dim_sel, dim_len) in enumerate(zip(selection, shape, strict=True)):
+        if is_integer(dim_sel):
+            runs.append(([normalize_integer_selection(dim_sel, dim_len)], [1]))
+            drop_axes.append(axis)
+        elif isinstance(dim_sel, slice):
+            if dim_sel.step not in (None, 1):
+                return None
+            runs.append(dim_sel)
+        elif arrays and (is_integer_array(dim_sel, 1) or is_bool_array(dim_sel, 1)):
+            idx = np.asarray(dim_sel)
+            if idx.dtype == bool:
+                if idx.size != dim_len:
+                    return None
+                idx = np.flatnonzero(idx)
+            idx = np.where(idx < 0, idx + dim_len, idx)
+            heads = np.flatnonzero(np.diff(idx, prepend=idx[:1] - 2) != 1)
+            runs.append((idx[heads], np.diff(np.append(heads, idx.size))))
+        else:
+            return None
+    if len(drop_axes) == len(shape):
+        return None
+    return tuple(runs), tuple(drop_axes)
+
+
 @dataclass(frozen=True)
 class RunIndexer(Indexer):
     """Runs on each axis, combined as a product; each axis's runs back to back."""
