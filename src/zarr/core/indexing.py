@@ -623,23 +623,7 @@ class BasicIndexer(Indexer):
 
 @dataclass(frozen=True)
 class RangeIndexer(Indexer):
-    """Ranges of the first axis, the other axes whole, read back to back into one output.
-
-    Range ``i`` is ``starts[i] : starts[i] + lengths[i]`` on axis 0. The output holds the ranges
-    one after another in the order given, so its first extent is ``sum(lengths)``. Ranges may
-    come in any order, overlap or repeat. A range that starts where the previous one ended is
-    merged into it first, so consecutive rows cost one projection per chunk, not one per row.
-    The work is per range and per chunk crossed, never per element.
-
-    Parameters
-    ----------
-    starts, lengths
-        One-dimensional integer arrays of equal length.
-    shape
-        The array shape.
-    chunk_grid
-        The array's chunk grid.
-    """
+    """Ranges ``starts[i] : starts[i] + lengths[i]`` of axis 0, other axes whole, back to back."""
 
     starts: npt.NDArray[np.int64]
     lengths: npt.NDArray[np.int64]
@@ -676,7 +660,7 @@ class RangeIndexer(Indexer):
             first[1:] = starts[1:] != starts[:-1] + lengths[:-1]
             heads = np.flatnonzero(first)
             starts, lengths = starts[heads], np.add.reduceat(lengths, heads)
-        out_starts = np.concatenate(([0], np.cumsum(lengths)[:-1])).astype(np.int64)
+        out_starts = np.cumsum(lengths) - lengths
         dim_grids = chunk_grid._dimensions
         trailing = [
             SliceDimIndexer(slice(None), dim_len, dim_grid)
