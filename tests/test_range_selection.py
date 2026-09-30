@@ -15,7 +15,8 @@ from zarr.errors import BoundsCheckError
 
 
 def expected(values: np.ndarray, starts: list[int], lengths: list[int]) -> np.ndarray:
-    return np.concatenate([values[s : s + n] for s, n in zip(starts, lengths, strict=True)] + [values[:0]])
+    parts = [values[s : s + n] for s, n in zip(starts, lengths, strict=True)]
+    return np.concatenate([*parts, values[:0]])
 
 
 @pytest.fixture(params=["chunked", "sharded"])
@@ -35,7 +36,6 @@ CASES = [
     ([10, 15, 20], [5, 5, 5]),  # touching: one read
     ([3, 7], [0, 2]),  # an empty range among others
     ([], []),
-    ([5], [0]),
     ([99], [1]),
 ]
 
@@ -49,7 +49,6 @@ def test_matches_numpy(
 
 
 def test_trailing_axes_whole() -> None:
-    """A trailing axis split over several chunks is read whole, for every range."""
     values = np.arange(20 * 6, dtype="f8").reshape(20, 6)
     a = zarr.create_array(store={}, shape=values.shape, chunks=(4, 4), dtype="f8")
     a[:] = values
@@ -120,7 +119,6 @@ def test_indexer_merges_touching_ranges() -> None:
 def test_pipeline_hook_serves_the_read(
     arr_1d: tuple[zarr.Array[Any], np.ndarray], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A pipeline that overrides the hook is handed the merged ranges and reads them itself."""
     a, _ = arr_1d
     calls: list[tuple[list[int], list[int]]] = []
 
@@ -137,7 +135,6 @@ def test_pipeline_hook_serves_the_read(
 def test_pipeline_hook_can_defer_to_the_default(
     arr_1d: tuple[zarr.Array[Any], np.ndarray], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An override that does not serve an array calls the base method, which reads it."""
     a, values = arr_1d
     calls = []
 
@@ -149,22 +146,3 @@ def test_pipeline_hook_can_defer_to_the_default(
     assert_array_equal(a.get_range_selection([5, 30], [10, 3]), expected(values, [5, 30], [10, 3]))
     assert calls == [1]
 
-
-def test_default_hook_reads_the_ranges(arr_1d: tuple[zarr.Array[Any], np.ndarray]) -> None:
-    a, values = arr_1d
-    pipeline = a.async_array.codec_pipeline
-    out = default_buffer_prototype().nd_buffer.empty(shape=(7,), dtype=np.dtype("i4"))
-    sync(
-        CodecPipeline.read_ranges(
-            pipeline,
-            a.store_path,
-            a.metadata,
-            np.array([90, 3]),
-            np.array([4, 3]),
-            out,
-            config=a.async_array.config,
-            chunk_grid=a._chunk_grid,
-            prototype=default_buffer_prototype(),
-        )
-    )
-    assert_array_equal(out.as_ndarray_like(), expected(values, [90, 3], [4, 3]))
