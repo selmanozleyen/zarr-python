@@ -703,6 +703,8 @@ def runs_of_selection(
                 if idx.size != dim_len:
                     return None
                 idx = np.flatnonzero(idx)
+            # Signed, so the differences below cannot wrap for unsigned indices.
+            idx = idx.astype(np.int64, copy=False)
             idx = np.where(idx < 0, idx + dim_len, idx)
             heads = np.flatnonzero(np.diff(idx, prepend=idx[:1] - 2) != 1)
             runs.append((idx[heads], np.diff(np.append(heads, idx.size))))

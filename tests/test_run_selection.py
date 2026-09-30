@@ -231,3 +231,16 @@ def test_no_dispatch_without_an_override() -> None:
     a = zarr.create_array(store={}, shape=(8, 8), chunks=(4, 4), dtype="u1")
     assert type(a.async_array.codec_pipeline).read_runs is CodecPipeline.read_runs
     assert_array_equal(a[1:3, 2:5], np.zeros((2, 3), dtype="u1"))
+
+
+def test_unsigned_rows_that_step_back_are_separate_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    values = np.arange(300, dtype="i4")
+    a = zarr.create_array(store={}, shape=values.shape, chunks=(64,), dtype="i4")
+    a[:] = values
+
+    async def read_runs(self, *args: Any, **kwargs: Any) -> None:  # type: ignore[no-untyped-def]
+        await CodecPipeline.read_runs(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(a.async_array.codec_pipeline), "read_runs", read_runs)
+    rows = np.array([255, 0], dtype="u1")
+    assert_array_equal(a.oindex[rows], values[rows])
