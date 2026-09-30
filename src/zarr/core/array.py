@@ -100,7 +100,8 @@ from zarr.core.indexing import (
     OIndex,
     OrthogonalIndexer,
     OrthogonalSelection,
-    RangeIndexer,
+    RunIndexer,
+    RunSelection,
     Selection,
     VIndex,
     _iter_grid,
@@ -1581,17 +1582,16 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             prototype=prototype,
         )
 
-    async def get_range_selection(
+    async def get_run_selection(
         self,
-        starts: npt.ArrayLike,
-        lengths: npt.ArrayLike,
+        selection: RunSelection,
         *,
         out: NDBuffer | None = None,
         prototype: BufferPrototype | None = None,
     ) -> NDArrayLikeOrScalar:
         if prototype is None:
             prototype = default_buffer_prototype()
-        indexer = RangeIndexer(starts, lengths, self.metadata.shape, self._chunk_grid)
+        indexer = RunIndexer(selection, self.metadata.shape, self._chunk_grid)
         if out is None:
             order = self.metadata.order if self.metadata.zarr_format == 2 else self.config.order
             out = prototype.nd_buffer.empty(
@@ -1601,18 +1601,27 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             raise ValueError(
                 f"shape of out argument doesn't match. Expected {indexer.shape}, got {out.shape}"
             )
-        if indexer.starts.size:
-            await self.codec_pipeline.read_ranges(
+        if product(indexer.shape) > 0:
+            await self.codec_pipeline.read_runs(
                 self.store_path,
                 self.metadata,
-                indexer.starts,
-                indexer.lengths,
+                indexer.runs,
                 out,
                 config=self.config,
                 chunk_grid=self._chunk_grid,
                 prototype=prototype,
             )
         return out.as_ndarray_like()
+
+    async def get_range_selection(
+        self,
+        starts: npt.ArrayLike,
+        lengths: npt.ArrayLike,
+        *,
+        out: NDBuffer | None = None,
+        prototype: BufferPrototype | None = None,
+    ) -> NDArrayLikeOrScalar:
+        return await self.get_run_selection(((starts, lengths),), out=out, prototype=prototype)
 
     async def get_coordinate_selection(
         self,
@@ -3600,23 +3609,24 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
             out_array = np.array(out_array).reshape(indexer.sel_shape)
         return out_array
 
-    def get_range_selection(
+    def get_run_selection(
         self,
-        starts: npt.ArrayLike,
-        lengths: npt.ArrayLike,
+        selection: RunSelection,
         *,
         out: NDBuffer | None = None,
         prototype: BufferPrototype | None = None,
     ) -> NDArrayLikeOrScalar:
-        """Get ranges of the first axis, other axes whole, back to back.
+        """Get runs on each axis, combined as a product.
 
-        Range ``i`` is ``starts[i] : starts[i] + lengths[i]``; ranges may overlap, repeat and
-        come in any order. The result has shape ``(sum(lengths), *shape[1:])``.
+        ``selection`` has one entry per axis, and missing trailing axes are whole: a slice with
+        step 1, or ``(starts, lengths)`` for runs ``starts[i] : starts[i] + lengths[i]``. Each
+        axis's runs come back to back, in the order given; they may overlap and repeat. Axis
+        ``k`` of the result has length ``sum(lengths)`` of its runs.
 
         Parameters
         ----------
-        starts, lengths : array-like
-            One-dimensional integer arrays of equal length.
+        selection : tuple
+            One slice or ``(starts, lengths)`` pair per axis.
         out : NDBuffer, optional
             If given, load the selected data directly into this buffer.
         prototype : BufferPrototype, optional
@@ -3625,7 +3635,31 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         Returns
         -------
         NDArrayLikeOrScalar
-            The ranges, back to back.
+            The selected data.
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> import zarr
+        >>> z = zarr.create_array(store={}, shape=(4, 6), chunks=(2, 2), dtype="i4")
+        >>> z[:] = np.arange(24).reshape(4, 6)
+        >>> z.get_run_selection((slice(1, 3), ([4, 0], [2, 1])))
+        array([[10, 11,  6],
+               [16, 17, 12]], dtype=int32)
+        """
+        return sync(self.async_array.get_run_selection(selection, out=out, prototype=prototype))
+
+    def get_range_selection(
+        self,
+        starts: npt.ArrayLike,
+        lengths: npt.ArrayLike,
+        *,
+        out: NDBuffer | None = None,
+        prototype: BufferPrototype | None = None,
+    ) -> NDArrayLikeOrScalar:
+        """Get runs ``starts[i] : starts[i] + lengths[i]`` of axis 0, other axes whole.
+
+        The same as ``get_run_selection(((starts, lengths),))``.
 
         Examples
         --------
@@ -3635,9 +3669,7 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         >>> z.get_range_selection([7, 1], [2, 3])
         array([7, 8, 1, 2, 3], dtype=int32)
         """
-        return sync(
-            self.async_array.get_range_selection(starts, lengths, out=out, prototype=prototype)
-        )
+        return self.get_run_selection(((starts, lengths),), out=out, prototype=prototype)
 
     def set_coordinate_selection(
         self,

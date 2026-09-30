@@ -9,7 +9,7 @@ from numpy.testing import assert_array_equal
 import zarr
 from zarr.abc.codec import CodecPipeline
 from zarr.core.buffer import default_buffer_prototype
-from zarr.core.indexing import RangeIndexer
+from zarr.core.indexing import RunIndexer
 from zarr.core.sync import sync
 from zarr.errors import BoundsCheckError
 
@@ -108,10 +108,10 @@ def test_out_of_the_wrong_shape(arr_1d: tuple[zarr.Array[Any], np.ndarray]) -> N
 
 def test_indexer_merges_touching_ranges() -> None:
     a = zarr.create_array(store={}, shape=(100,), chunks=(10,), dtype="u1")
-    indexer = RangeIndexer([10, 15, 20, 50, 60], [5, 5, 5, 3, 0], a.shape, a._chunk_grid)
-    assert indexer.starts.tolist() == [10, 50]
-    assert indexer.lengths.tolist() == [15, 3]
-    assert indexer.out_starts.tolist() == [0, 15]
+    indexer = RunIndexer((([10, 15, 20, 50, 60], [5, 5, 5, 3, 0]),), a.shape, a._chunk_grid)
+    (starts, lengths), = indexer.runs
+    assert starts.tolist() == [10, 50]
+    assert lengths.tolist() == [15, 3]
     # 10..25 crosses two chunks, 50..53 one: a projection per chunk crossed, not per row.
     assert len(list(indexer)) == 3
 
@@ -120,15 +120,15 @@ def test_pipeline_hook_serves_the_read(
     arr_1d: tuple[zarr.Array[Any], np.ndarray], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     a, _ = arr_1d
-    calls: list[tuple[list[int], list[int]]] = []
+    calls: list[list[tuple[list[int], list[int]]]] = []
 
-    async def read_ranges(self, store_path, metadata, starts, lengths, out, **kwargs) -> None:  # type: ignore[no-untyped-def]
-        calls.append((starts.tolist(), lengths.tolist()))
+    async def read_runs(self, store_path, metadata, runs, out, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        calls.append([(s.tolist(), n.tolist()) for s, n in runs])
         out.as_ndarray_like()[...] = -1
 
-    monkeypatch.setattr(type(a.async_array.codec_pipeline), "read_ranges", read_ranges)
+    monkeypatch.setattr(type(a.async_array.codec_pipeline), "read_runs", read_runs)
     got = a.get_range_selection([10, 15, 40], [5, 5, 2])
-    assert calls == [([10, 40], [10, 2])]
+    assert calls == [[([10, 40], [10, 2])]]
     assert_array_equal(got, np.full(12, -1))
 
 
@@ -138,11 +138,29 @@ def test_pipeline_hook_can_defer_to_the_default(
     a, values = arr_1d
     calls = []
 
-    async def read_ranges(self, *args: Any, **kwargs: Any) -> None:  # type: ignore[no-untyped-def]
+    async def read_runs(self, *args: Any, **kwargs: Any) -> None:  # type: ignore[no-untyped-def]
         calls.append(1)
-        await CodecPipeline.read_ranges(self, *args, **kwargs)
+        await CodecPipeline.read_runs(self, *args, **kwargs)
 
-    monkeypatch.setattr(type(a.async_array.codec_pipeline), "read_ranges", read_ranges)
+    monkeypatch.setattr(type(a.async_array.codec_pipeline), "read_runs", read_runs)
     assert_array_equal(a.get_range_selection([5, 30], [10, 3]), expected(values, [5, 30], [10, 3]))
     assert calls == [1]
 
+
+
+@pytest.mark.parametrize("shards", [None, (20, 10, 10)])
+def test_runs_on_several_axes(shards: tuple[int, ...] | None) -> None:
+    values = np.arange(60 * 10 * 20, dtype="i4").reshape(60, 10, 20)
+    a = zarr.create_array(store={}, shape=values.shape, chunks=(4, 5, 5), shards=shards, dtype="i4")
+    a[:] = values
+    selection = (([0, 40, 3], [5, 5, 2]), slice(2, 6), ([10, 0], [3, 2]))
+    rows, cols, depth = np.r_[0:5, 40:45, 3:5], np.r_[2:6], np.r_[10:13, 0:2]
+    assert_array_equal(a.get_run_selection(selection), values[np.ix_(rows, cols, depth)])
+
+
+def test_run_selection_refusals(arr_1d: tuple[zarr.Array[Any], np.ndarray]) -> None:
+    a, _ = arr_1d
+    with pytest.raises(IndexError, match="step 1"):
+        a.get_run_selection((slice(0, 10, 2),))
+    with pytest.raises(IndexError, match="too many axes"):
+        a.get_run_selection((slice(None), slice(None)))

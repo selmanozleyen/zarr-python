@@ -490,28 +490,27 @@ class CodecPipeline:
         """
         ...
 
-    async def read_ranges(
+    async def read_runs(
         self,
         store_path: StorePath,
         metadata: ArrayMetadata,
-        starts: npt.NDArray[np.int64],
-        lengths: npt.NDArray[np.int64],
+        runs: tuple[tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]], ...],
         out: NDBuffer,
         *,
         config: ArrayConfig,
         chunk_grid: ChunkGrid,
         prototype: BufferPrototype,
     ) -> None:
-        """Read ranges of axis 0, other axes whole, back to back into ``out``.
+        """Read a run selection into ``out``: ``(starts, lengths)`` on every axis, as a product.
 
-        The ranges are nonempty, in bounds and already merged where they touch. This default
-        reads them through `RangeIndexer`; a pipeline with a faster path overrides it and calls
-        ``super().read_ranges`` for arrays it does not serve.
+        The runs are nonempty, in bounds and already merged where they touch. This default
+        reads them through `RunIndexer`; a pipeline with a faster path overrides it and calls
+        ``super().read_runs`` for selections it does not serve.
         """
         from zarr.core.array import _get_selection
-        from zarr.core.indexing import RangeIndexer
+        from zarr.core.indexing import RunIndexer
 
-        indexer = RangeIndexer(starts, lengths, metadata.shape, chunk_grid)
+        indexer = RunIndexer(runs, metadata.shape, chunk_grid)
         await _get_selection(
             store_path, metadata, self, config, chunk_grid, indexer, prototype=prototype, out=out
         )

@@ -621,79 +621,96 @@ class BasicIndexer(Indexer):
             yield ChunkProjection(chunk_coords, chunk_selection, out_selection, is_complete_chunk)
 
 
-@dataclass(frozen=True)
-class RangeIndexer(Indexer):
-    """Ranges ``starts[i] : starts[i] + lengths[i]`` of axis 0, other axes whole, back to back."""
+RunSelection = tuple["slice | tuple[npt.ArrayLike, npt.ArrayLike]", ...]
 
-    starts: npt.NDArray[np.int64]
-    lengths: npt.NDArray[np.int64]
-    out_starts: npt.NDArray[np.int64]
-    trailing: list[SliceDimIndexer]
-    dim_grid: DimensionGrid
-    shape: tuple[int, ...]
-    drop_axes: tuple[int, ...]
 
-    def __init__(
-        self,
-        starts: npt.ArrayLike,
-        lengths: npt.ArrayLike,
-        shape: tuple[int, ...],
-        chunk_grid: ChunkGrid,
-    ) -> None:
-        if len(shape) == 0:
-            raise IndexError("range selection needs an array with at least one dimension")
-        starts = np.asarray(starts)
-        lengths = np.asarray(lengths)
+def _normalize_runs(
+    dim_sel: slice | tuple[npt.ArrayLike, npt.ArrayLike], dim_len: int, axis: int
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
+    if isinstance(dim_sel, slice):
+        start, stop, step = dim_sel.indices(dim_len)
+        if step != 1:
+            raise IndexError("a run selection only takes slices with step 1")
+        starts, lengths = np.array([start]), np.array([max(stop - start, 0)])
+    else:
+        starts, lengths = (np.asarray(x) for x in dim_sel)
         if starts.ndim != 1 or starts.shape != lengths.shape:
             raise IndexError("starts and lengths must be one-dimensional and of equal length")
         if starts.size and not (is_integer_array(starts) and is_integer_array(lengths)):
             raise IndexError("starts and lengths must be integer arrays")
-        starts = starts.astype(np.int64, copy=False)
-        lengths = lengths.astype(np.int64, copy=False)
-        if (lengths < 0).any() or (starts < 0).any() or (starts + lengths > shape[0]).any():
-            raise BoundsCheckError(f"a range falls outside axis 0, which has length {shape[0]}")
-        keep = lengths > 0
-        starts, lengths = starts[keep], lengths[keep]
-        if starts.size:
-            # A range continuing the previous one is the same read.
-            first = np.ones(starts.size, dtype=bool)
-            first[1:] = starts[1:] != starts[:-1] + lengths[:-1]
-            heads = np.flatnonzero(first)
-            starts, lengths = starts[heads], np.add.reduceat(lengths, heads)
-        out_starts = np.cumsum(lengths) - lengths
-        dim_grids = chunk_grid._dimensions
-        trailing = [
-            SliceDimIndexer(slice(None), dim_len, dim_grid)
-            for dim_len, dim_grid in zip(shape[1:], dim_grids[1:], strict=True)
-        ]
-        object.__setattr__(self, "starts", starts)
-        object.__setattr__(self, "lengths", lengths)
-        object.__setattr__(self, "out_starts", out_starts)
-        object.__setattr__(self, "trailing", trailing)
-        object.__setattr__(self, "dim_grid", dim_grids[0])
-        object.__setattr__(self, "shape", (int(lengths.sum()), *shape[1:]))
+    starts = starts.astype(np.int64, copy=False)
+    lengths = lengths.astype(np.int64, copy=False)
+    if (lengths < 0).any() or (starts < 0).any() or (starts + lengths > dim_len).any():
+        raise BoundsCheckError(f"a run falls outside axis {axis}, which has length {dim_len}")
+    keep = lengths > 0
+    starts, lengths = starts[keep], lengths[keep]
+    if starts.size:
+        # A run continuing the previous one is the same read.
+        first = np.ones(starts.size, dtype=bool)
+        first[1:] = starts[1:] != starts[:-1] + lengths[:-1]
+        heads = np.flatnonzero(first)
+        starts, lengths = starts[heads], np.add.reduceat(lengths, heads)
+    return starts, lengths
+
+
+def _run_pieces(
+    starts: npt.NDArray[np.int64], lengths: npt.NDArray[np.int64], dim_grid: DimensionGrid
+) -> list[ChunkDimProjection]:
+    pieces = []
+    out = 0
+    for start, length in zip(starts.tolist(), lengths.tolist(), strict=True):
+        stop = start + length
+        for ix in range(dim_grid.index_to_chunk(start), dim_grid.index_to_chunk(stop - 1) + 1):
+            offset, size = dim_grid.chunk_offset(ix), dim_grid.data_size(ix)
+            lo, hi = max(start, offset), min(stop, offset + size)
+            pieces.append(
+                ChunkDimProjection(
+                    ix,
+                    slice(lo - offset, hi - offset),
+                    slice(out + lo - start, out + hi - start),
+                    lo == offset and hi == offset + size,
+                )
+            )
+        out += length
+    return pieces
+
+
+@dataclass(frozen=True)
+class RunIndexer(Indexer):
+    """Runs on each axis, combined as a product; each axis's runs back to back."""
+
+    runs: tuple[tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]], ...]
+    dim_grids: tuple[DimensionGrid, ...]
+    shape: tuple[int, ...]
+    drop_axes: tuple[int, ...]
+
+    def __init__(self, selection: RunSelection, shape: tuple[int, ...], chunk_grid: ChunkGrid) -> None:
+        if len(shape) == 0:
+            raise IndexError("run selection needs an array with at least one dimension")
+        if len(selection) > len(shape):
+            raise IndexError(f"too many axes: {len(selection)} for an array of {len(shape)}")
+        selection = (*selection, *(slice(None),) * (len(shape) - len(selection)))
+        runs = tuple(
+            _normalize_runs(dim_sel, dim_len, axis)
+            for axis, (dim_sel, dim_len) in enumerate(zip(selection, shape, strict=True))
+        )
+        object.__setattr__(self, "runs", runs)
+        object.__setattr__(self, "dim_grids", tuple(chunk_grid._dimensions))
+        object.__setattr__(self, "shape", tuple(int(lengths.sum()) for _, lengths in runs))
         object.__setattr__(self, "drop_axes", ())
 
     def __iter__(self) -> Iterator[ChunkProjection]:
-        g = self.dim_grid
-        trailing = list(itertools.product(*self.trailing))
-        for start, length, out in zip(
-            self.starts.tolist(), self.lengths.tolist(), self.out_starts.tolist(), strict=True
-        ):
-            stop = start + length
-            for ix in range(g.index_to_chunk(start), g.index_to_chunk(stop - 1) + 1):
-                offset, size = g.chunk_offset(ix), g.data_size(ix)
-                lo, hi = max(start, offset), min(stop, offset + size)
-                sel = slice(lo - offset, hi - offset)
-                out_sel = slice(out + lo - start, out + hi - start)
-                whole = lo == offset and hi == offset + size
-                for dims in trailing:
-                    yield ChunkProjection(
-                        (ix, *(p.dim_chunk_ix for p in dims)),
-                        (sel, *(p.dim_chunk_sel for p in dims)),
-                        (out_sel, *(p.dim_out_sel for p in dims)),
-                        whole and all(p.is_complete_chunk for p in dims),
-                    )
+        pieces = [
+            _run_pieces(starts, lengths, g)
+            for (starts, lengths), g in zip(self.runs, self.dim_grids, strict=True)
+        ]
+        for dims in itertools.product(*pieces):
+            yield ChunkProjection(
+                tuple(p.dim_chunk_ix for p in dims),
+                tuple(p.dim_chunk_sel for p in dims),
+                tuple(p.dim_out_sel for p in dims),
+                all(p.is_complete_chunk for p in dims),
+            )
 
 
 @dataclass(frozen=True)
