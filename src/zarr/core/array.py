@@ -146,6 +146,7 @@ from zarr.core.sync import sync
 from zarr.errors import (
     ArrayNotFoundError,
     ChunkNotFoundError,
+    LazyIndexingDisabledError,
     MetadataValidationError,
     ZarrDeprecationWarning,
     ZarrUserWarning,
@@ -165,6 +166,7 @@ if TYPE_CHECKING:
     from typing import Self
 
     import numpy.typing as npt
+    from zarr_indexing import LazyArray
 
     from zarr.abc.codec import CodecPipeline
     from zarr.abc.store import Store
@@ -1743,6 +1745,11 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         [set_coordinate_selection][zarr.Array.set_coordinate_selection], [get_mask_selection][zarr.Array.get_mask_selection] and
         [set_mask_selection][zarr.Array.set_mask_selection] for documentation and examples."""
         return AsyncVIndex(self)
+
+    @property
+    def lazy(self) -> LazyArray:
+        """Experimental lazy indexing, see [Array.lazy][zarr.Array.lazy]. `result()` is synchronous."""
+        return Array(self).lazy
 
     async def resize(self, new_shape: ShapeLike, delete_outside_chunks: bool = True) -> None:
         """
@@ -3936,6 +3943,26 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         [set_block_selection][zarr.Array.set_block_selection] for documentation and
         examples."""
         return BlockIndex(self)
+
+    @property
+    def lazy(self) -> LazyArray:
+        """Experimental: a `zarr_indexing.LazyArray` view that reads only on `.result()`.
+
+        See [lazy indexing](../../user-guide/experimental.md#lazy-indexing-with-arraylazy).
+        """
+        if not zarr_config.get("experimental_lazy_indexing"):
+            raise LazyIndexingDisabledError(
+                "Lazy indexing is experimental and disabled by default. Enable it with "
+                "zarr.config.set({'experimental_lazy_indexing': True}) or "
+                "ZARR_EXPERIMENTAL_LAZY_INDEXING=True"
+            )
+        try:
+            from zarr_indexing import LazyArray
+        except ImportError as e:
+            raise ImportError(
+                "Lazy indexing requires zarr-indexing: pip install 'zarr[lazy]'"
+            ) from e
+        return LazyArray(self)
 
     def resize(self, new_shape: ShapeLike) -> None:
         """

@@ -87,6 +87,7 @@ gpu = [
 ]
 cast-value-rs = ["cast-value-rs>=0.5.1"]
 cli = ["typer"]
+lazy = ["zarr-indexing>=0.3.0"]
 optional = ["universal-pathlib"]
 
 [project.scripts]
@@ -160,6 +161,8 @@ dev = [
     {include-group = "docs"},
     "universal-pathlib",
     "mypy==2.4.1",
+    # mypy checks `Array.lazy` against zarr-indexing's types.
+    "zarr-indexing>=0.3.0",
 ]
 
 [tool.coverage.report]
@@ -202,6 +205,7 @@ matrix.deps.features = [
   {value = "optional", if = ["optional"]},
   {value = "cli", if = ["optional"]},
   {value = "cast-value-rs", if = ["optional"]},
+  {value = "lazy", if = ["optional"]},
 ]
 matrix.deps.dependency-groups = [
   {value = "remote-tests", if = ["optional"]},

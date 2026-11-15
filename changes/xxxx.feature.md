@@ -1,0 +1,1 @@
+Add an experimental `Array.lazy` accessor for lazy indexing, backed by `zarr-indexing` (`pip install 'zarr[lazy]'`, `ZARR_EXPERIMENTAL_LAZY_INDEXING=True`). See [lazy indexing](https://zarr.readthedocs.io/en/latest/user-guide/experimental/#lazy-indexing-with-arraylazy).

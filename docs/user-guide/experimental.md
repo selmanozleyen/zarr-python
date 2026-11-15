@@ -91,6 +91,32 @@ zarr.config.set({"codec_pipeline.max_workers": None})
 On many-core nodes a pool sized to `cpu_count` can oversubscribe workloads that already parallelize at a higher level (e.g. Dask).
 `codec_pipeline.max_workers` only affects `FusedCodecPipeline`; the default `BatchedCodecPipeline` ignores it.
 
+## Lazy indexing with `Array.lazy`
+
+`arr.lazy[...]` returns a view that composes further selections without IO and reads on
+`.result()` or `numpy.asarray`. Eager `arr[...]` is unchanged. It is backed by
+[`zarr-indexing`](https://zarr.readthedocs.io/projects/zarr-indexing/) and is off by default:
+
+```bash
+pip install "zarr[lazy]"
+export ZARR_EXPERIMENTAL_LAZY_INDEXING=True  # or zarr.config.set({"experimental_lazy_indexing": True})
+```
+
+```python
+view = arr.lazy[10:20, ::2]         # no IO
+view = view[3:5].oindex[:, [0, 4]]  # still no IO
+view.result()                       # reads; equals arr[13:15, ::2][:, [0, 4]]
+```
+
+Views follow zarr-indexing's selection rules, which differ from eager indexing:
+
+- `[...]` takes integers and slices only, including negative steps; pass integer arrays through `.oindex`.
+- `.vindex` applies scalar indices first, so `lazy.vindex[0, ..., [1, 2]]` on shape `(2, 3, 4)` has shape `(3, 2)`, not NumPy's `(2, 3)`.
+- A sharded array is read one inner chunk at a time: a view over a shard of 64 inner chunks makes 64 store reads where eager indexing makes one. `view.unpartitioned().result()` reads it in one call.
+- Assignment, `arr.lazy[...] = values`, writes through.
+- A view does not follow a later `resize`; take a new one.
+- `result()` is synchronous, also on `AsyncArray.lazy`.
+
 ## `CacheStore`
 
 Zarr Python 3.1.4 adds [`zarr.experimental.cache_store.CacheStore`][], which provides a dual-store caching implementation

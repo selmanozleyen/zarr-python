@@ -95,6 +95,7 @@ config = Config(
     defaults=[
         {
             "default_zarr_format": 3,
+            "experimental_lazy_indexing": False,
             "array": {
                 "order": "C",
                 "write_empty_chunks": False,
