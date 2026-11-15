@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Literal, Protocol, TypeGuard, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeGuard, runtime_checkable
 
 from typing_extensions import ReadOnly, TypedDict
 
@@ -12,8 +12,11 @@ from zarr.core.common import NamedConfig, concurrent_map
 from zarr.core.config import config
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable
+    from collections.abc import Awaitable, Callable, Iterable, Sequence
     from typing import Self
+
+    import numpy.typing as npt
+    from zarr_indexing import IndexTransform
 
     from zarr.abc.store import ByteGetter, ByteSetter, Store
     from zarr.core.array_spec import ArraySpec
@@ -484,6 +487,56 @@ class CodecPipeline:
         """
         ...
 
+    async def read_gather(
+        self,
+        requests: Iterable[
+            tuple[ByteGetter, ArraySpec, Sequence[tuple[IndexTransform, npt.NDArray[Any]]]]
+        ],
+    ) -> tuple[GetResult, ...]:
+        """Read each chunk once and fill every destination it serves. Experimental.
+
+        Used by [`zarr.experimental.gather`][]. Each request names one stored chunk
+        and the reads it serves: a chunk-local `zarr_indexing.IndexTransform` and a
+        writable system-memory array of that transform's domain shape to fill.
+
+        This default reads the bounding box of a chunk's reads with `read`, so a
+        sharded chunk decodes only the inner chunks inside it, then fills each
+        destination from that block. A pipeline that can read the plan directly
+        overrides it.
+
+        Returns
+        -------
+        tuple[GetResult, ...]
+            One result per request.
+        """
+        from zarr_indexing import ReadContext, numpy_reader
+
+        async def read_chunk(
+            byte_getter: ByteGetter,
+            spec: ArraySpec,
+            reads: Sequence[tuple[IndexTransform, npt.NDArray[Any]]],
+        ) -> GetResult:
+            lo, hi = _chunk_hull([transform for transform, _ in reads])
+            box = tuple(slice(a, b) for a, b in zip(lo, hi, strict=True))
+            block = spec.prototype.nd_buffer.empty(
+                shape=tuple(b - a for a, b in zip(lo, hi, strict=True)),
+                dtype=spec.dtype.to_native_dtype(),
+                order=spec.order,
+            )
+            complete = all(a == 0 for a in lo) and hi == spec.shape
+            (result,) = await self.read(
+                [(byte_getter, spec, box, (slice(None),) * len(box), complete)], block
+            )
+            values = block.as_numpy_array()
+            shift = tuple(-a for a in lo)
+            for transform, out in reads:
+                numpy_reader.read_into(values, ReadContext(transform.translate(shift)), out)
+            return result
+
+        return tuple(
+            await concurrent_map(list(requests), read_chunk, config.get("async.concurrency"))
+        )
+
     @abstractmethod
     async def write(
         self,
@@ -528,3 +581,34 @@ def _noop_for_none[CI: CodecInput, CO: CodecOutput](
         return await func(chunk, chunk_spec)
 
     return wrap
+
+
+def _chunk_hull(
+    transforms: Sequence[IndexTransform],
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """The smallest box, `[lo, hi)` per axis, holding every coordinate the transforms read."""
+    from zarr_indexing import ConstantMap, DimensionMap
+
+    hull: list[tuple[int, int]] | None = None
+    for transform in transforms:
+        domain = transform.domain
+        box: list[tuple[int, int]] = []
+        for m in transform.output:
+            if isinstance(m, ConstantMap):
+                box.append((m.offset, m.offset + 1))
+            elif isinstance(m, DimensionMap):
+                d = m.input_dimension
+                first = m.offset + m.stride * domain.inclusive_min[d]
+                last = m.offset + m.stride * (domain.exclusive_max[d] - 1)
+                box.append((min(first, last), max(first, last) + 1))
+            else:
+                coordinates = m.offset + m.stride * m.index_array
+                box.append((int(coordinates.min()), int(coordinates.max()) + 1))
+        hull = (
+            box
+            if hull is None
+            else [(min(a, c), max(b, d)) for (a, b), (c, d) in zip(hull, box, strict=True)]
+        )
+    if hull is None:
+        raise ValueError("a chunk request needs at least one read")
+    return tuple(a for a, _ in hull), tuple(b for _, b in hull)

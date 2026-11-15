@@ -117,6 +117,23 @@ Views follow zarr-indexing's selection rules, which differ from eager indexing:
 - A view does not follow a later `resize`; take a new one.
 - `result()` is synchronous, also on `AsyncArray.lazy`.
 
+### Reading many views at once with `gather`
+
+`zarr.experimental.gather(views)` reads several lazy views together and returns one array per
+view, each equal to `view.result()`. Each view is planned on its array's storage grid, so a stored
+chunk, or a whole shard, is fetched and decoded once however many views touch it:
+
+```python
+from zarr.experimental import gather
+
+x, y = gather([arr.lazy[0:100], arr.lazy[50:150]])  # the overlapping chunks are read once
+```
+
+The reads of one array go to its codec pipeline in a single `CodecPipeline.read_gather` call, which
+receives every stored chunk once together with all the reads it serves. The default reads the
+bounding box of a chunk's reads, so a sharded chunk decodes only the inner chunks inside it; a
+pipeline that can read the plan directly overrides it. `gather_async` is the asynchronous form.
+
 ## `CacheStore`
 
 Zarr Python 3.1.4 adds [`zarr.experimental.cache_store.CacheStore`][], which provides a dual-store caching implementation
