@@ -1,0 +1,1 @@
+Add experimental `zarr.experimental.gather`, which reads several lazy views in one call and fetches and decodes each stored chunk once, and `CodecPipeline.read_gather`, the hook it calls with every chunk's reads. Requires `experimental_lazy_indexing`.
