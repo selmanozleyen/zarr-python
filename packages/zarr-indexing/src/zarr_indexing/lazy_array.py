@@ -745,7 +745,7 @@ class LazyArray:
     def is_box(self) -> bool:
         """Whether this view selects a rectangular region rather than a point list.
 
-        True exactly when the composed transform has no `ArrayMap` output maps.
+        True exactly when the composed transform has no `ArrayMap` or `RangeMap` output maps.
         Basic indexing of a box stays a box. Advanced indexing can introduce
         index arrays, but singleton gathers and later selections may remove them.
 
@@ -813,9 +813,8 @@ class LazyArray:
                 last = m.offset + m.stride * (domain.exclusive_max[d] - 1)
                 bounds.append((min(first, last), max(first, last) + 1))
             elif isinstance(m, RangeMap):
-                nonempty = m.lengths > 0
-                starts = m.starts[nonempty]
-                bounds.append((int(starts.min()), int((starts + m.lengths[nonempty]).max())))
+                lo, hi = m.bounds()
+                bounds.append((lo, hi + 1))
             else:
                 coords = m.offset + m.stride * m.index_array
                 bounds.append((int(coords.min()), int(coords.max()) + 1))

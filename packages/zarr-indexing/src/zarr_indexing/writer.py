@@ -46,9 +46,8 @@ def write_into(
     applied; this operation is not transactional.
     """
     from zarr_indexing.lazy_array import LazyArray
-    from zarr_indexing.transform import _expand_ranges  # pyright: ignore[reportPrivateUsage]
 
-    transform = _expand_ranges(transform)
+    transform = transform.expand_ranges()
     shape = transform.domain.shape
     source_shape = tuple(int(extent) for extent in source.shape)
     if transform.output_rank != len(source_shape):

@@ -59,7 +59,6 @@ from zarr_indexing.output_map import (
 )
 from zarr_indexing.transform import (
     IndexTransform,
-    _expand_ranges,  # pyright: ignore[reportPrivateUsage]
     _intersect_dimension_map,  # pyright: ignore[reportPrivateUsage]
     _prepare_correlated,  # pyright: ignore[reportPrivateUsage]
 )
@@ -534,7 +533,12 @@ class RunSet:
     def __len__(self) -> int:
         return int(self.chunk.size)
 
-    def run(self, row: int) -> slice:
+    @property
+    def counts(self) -> np.ndarray[Any, np.dtype[np.intp]]:
+        """Pieces per row."""
+        return np.diff(self.pointer)
+
+    def pieces(self, row: int) -> slice:
         """The slice of the piece columns a row owns."""
         return slice(int(self.pointer[row]), int(self.pointer[row + 1]))
 
@@ -770,13 +774,10 @@ def _run_set(out_dim: int, m: RangeMap, dg: DimensionGridLike) -> RunSet:
     starts = m.starts[keep]
     stops = starts + m.lengths[keep]
     position = (np.cumsum(m.lengths) - m.lengths)[keep]
-    # Probe the extreme coordinates with the scalar lookup first, as
-    # `_indexed_set` does: its error names the offending coordinate.
     dg.index_to_chunk(int(starts.min()))
     dg.index_to_chunk(int((stops - 1).max()))
     first = dg.indices_to_chunks(starts)
     count = dg.indices_to_chunks(stops - 1) - first + 1
-    # One piece per (run, chunk the run crosses), in request order.
     run = np.repeat(np.arange(starts.size, dtype=np.intp), count)
     step = np.arange(run.size, dtype=np.intp) - np.repeat(np.cumsum(count) - count, count)
     chunk = np.repeat(first, count) + step
@@ -785,9 +786,20 @@ def _run_set(out_dim: int, m: RangeMap, dg: DimensionGridLike) -> RunSet:
     c_start = unique_start[inverse]
     lo = np.maximum(starts[run], c_start)
     hi = np.minimum(stops[run], c_start + unique_extent[inverse])
-    nonempty = hi > lo  # a zero-extent grid cell inside a run holds no piece
-    order = np.argsort(inverse[nonempty], kind="stable")
-    rows, counts = np.unique(inverse[nonempty][order], return_counts=True)
+    order = np.argsort(inverse, kind="stable")
+    row = inverse[order]
+    local = (lo - c_start)[order]
+    length = (hi - lo)[order]
+    piece_position = (position[run] + lo - starts[run])[order]
+    # Pieces that continue each other in storage and in the request merge, so
+    # consecutive rows of a batch plan like one run.
+    continues = (
+        (row[1:] == row[:-1])
+        & (local[1:] == local[:-1] + length[:-1])
+        & (piece_position[1:] == piece_position[:-1] + length[:-1])
+    )
+    head = np.flatnonzero(np.concatenate([[True], ~continues]))
+    rows, counts = np.unique(row[head], return_counts=True)
     return RunSet(
         output_dimension=out_dim,
         input_dimension=m.input_dimension,
@@ -795,9 +807,9 @@ def _run_set(out_dim: int, m: RangeMap, dg: DimensionGridLike) -> RunSet:
         chunk_start=unique_start[rows],
         chunk_extent=unique_extent[rows],
         pointer=np.concatenate([[0], np.cumsum(counts)]).astype(np.intp),
-        local_start=(lo - c_start)[nonempty][order],
-        length=(hi - lo)[nonempty][order],
-        position=(position[run] + lo - starts[run])[nonempty][order],
+        local_start=local[head],
+        length=np.add.reduceat(length, head) if head.size else length,
+        position=piece_position[head],
     )
 
 
@@ -935,12 +947,8 @@ def _indexed_piece(axis: IndexedSet, row: int, rank: int, origin: int) -> _AxisP
 
 
 def _run_piece(axis: RunSet, row: int, rank: int, origin: int) -> _AxisPiece:
-    """One row of a run table: a slice when the chunk holds one piece, else index arrays.
-
-    Expanding a row costs as much as reading it, so rows expand while the
-    table itself stays O(runs + pieces).
-    """
-    run = axis.run(row)
+    """One row of a run table: a slice when the chunk holds one piece, else index arrays."""
+    run = axis.pieces(row)
     k = axis.input_dimension
     c_start = int(axis.chunk_start[row])
     c_extent = int(axis.chunk_extent[row])
@@ -1314,11 +1322,10 @@ def _partition_transform(
             transform=transform, dimension_grids=grids, sets=(), joint_sets=(), row_shape=(0,)
         )
     correlated = transform.index_array_structure == "general"
-    if correlated:
-        # ponytail: runs beside correlated index arrays expand; the joint walk has no run table.
-        transform = _expand_ranges(transform)
+    # The joint walk has no run table, so runs beside correlated arrays expand.
+    planned = transform.expand_ranges() if correlated else transform
     sets: list[StridedSet | IndexedSet | RunSet] = []
-    for out_dim, m in enumerate(transform.output):
+    for out_dim, m in enumerate(planned.output):
         if isinstance(m, RangeMap):
             sets.append(_run_set(out_dim, m, grids[out_dim]))
         elif isinstance(m, ArrayMap):
@@ -1327,7 +1334,7 @@ def _partition_transform(
             sets.append(_indexed_set(out_dim, m, grids[out_dim]))
         else:
             sets.append(_strided_set(transform, out_dim, m, grids[out_dim]))
-    joint_sets = _component_joint_sets(transform, grids) if correlated else ()
+    joint_sets = _component_joint_sets(planned, grids) if correlated else ()
     row_shape = tuple(len(axis) for axis in sets) + tuple(len(joint) for joint in joint_sets)
     return GridPartition(
         transform=transform,

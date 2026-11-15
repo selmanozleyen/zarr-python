@@ -55,7 +55,8 @@ the selection) is a length-one axis of the result.
 The four reads are the four chunks the two axis tables multiply out to, and no
 intermediate transform, domain, or projection was built. A gather reads its
 `IndexedSet` rows the same way — `index[pointer[i]:pointer[i + 1]]` and the
-matching `positions` — and a general selection its `joint_sets` rows, whose
+matching `positions` — a run selection its `RunSet` rows as pieces of
+`local_start`, `length` and `position`, and a general selection its `joint_sets` rows, whose
 `local` coordinates already have the chunk origin subtracted. Both tables
 compute `local` once on first access and return the same read-only array
 afterward, so accessing a row does not recalculate every point.

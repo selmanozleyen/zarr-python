@@ -256,8 +256,6 @@ class IndexTransform:
         >>> transform.apply((3,))
         (6,)
         """
-        if (expanded := _expand_ranges(self)) is not self:
-            return expanded.apply(point)
         coordinates = np.asarray(point)
         expected_shape = (self.input_rank,)
         if coordinates.shape != expected_shape:
@@ -313,8 +311,6 @@ class IndexTransform:
         >>> transform.apply_many(np.array([[0], [1], [49]])).tolist()
         [[0], [2], [98]]
         """
-        if (expanded := _expand_ranges(self)) is not self:
-            return expanded.apply_many(points)
         coordinates = np.asarray(points)
         if coordinates.ndim == 0 or coordinates.shape[-1] != self.input_rank:
             raise ValueError(
@@ -370,6 +366,10 @@ class IndexTransform:
                     output_map.stride,
                     points[..., output_map.input_dimension],
                 )
+            elif isinstance(output_map, RangeMap):
+                k = output_map.input_dimension
+                positions = _positions_from_origin(points[..., k], self.domain.inclusive_min[k])
+                result[..., output_dimension] = output_map.at(positions)
             else:
                 index = tuple(
                     np.zeros(batch_shape, dtype=np.intp)
@@ -405,7 +405,7 @@ class IndexTransform:
             when input labels cannot be transferred to unlabeled output
             dimensions.
         """
-        if (expanded := _expand_ranges(self)) is not self:
+        if (expanded := self.expand_ranges()) is not self:
             return expanded.inverted()
         if self.domain.labels is not None:
             raise ValueError(
@@ -489,8 +489,6 @@ class IndexTransform:
         Constant (integer-indexed) dimensions show as a single value.
         Array-indexed dimensions show the set of selected coordinates.
         """
-        if (expanded := _expand_ranges(self)) is not self:
-            return expanded.selection_repr
         parts: list[str] = []
         for m in self.output:
             if isinstance(m, ConstantMap):
@@ -505,8 +503,9 @@ class IndexTransform:
                     parts.append(f"[{start}, {stop})")
                 else:
                     parts.append(f"[{start}, {stop}) step {m.stride}")
+            elif isinstance(m, RangeMap):
+                parts.append("{" + f"runs({m.starts.size})" + "}")
             else:
-                # m: ArrayMap (OutputIndexMap = ConstantMap | DimensionMap | ArrayMap)
                 storage = m.offset + m.stride * m.index_array
                 n = int(storage.size)  # .size, not len(): index_array may be 0-d
                 if n <= 5:
@@ -523,8 +522,9 @@ class IndexTransform:
                 maps.append(f"out[{i}] = {m.offset}")
             elif isinstance(m, DimensionMap):
                 maps.append(f"out[{i}] = {m.offset} + {m.stride} * in[{m.input_dimension}]")
+            elif isinstance(m, RangeMap):
+                maps.append(f"out[{i}] = runs({m.starts.size})[in[{m.input_dimension}]]")
             else:
-                # m: ArrayMap (OutputIndexMap = ConstantMap | DimensionMap | ArrayMap)
                 maps.append(f"out[{i}] = {m.offset} + {m.stride} * arr{m.index_array.shape}[in]")
         maps_str = ", ".join(maps)
         return f"IndexTransform(domain={self.domain}, {maps_str})"
@@ -562,7 +562,7 @@ class IndexTransform:
             also referenced by a DimensionMap. These dependencies cannot be
             filtered independently by the current intersection implementation.
         """
-        return _intersect(_expand_ranges(self), output_domain)
+        return _intersect(self.expand_ranges(), output_domain)
 
     def translate(self, shift: tuple[int, ...]) -> IndexTransform:
         """Shift the source coordinates every cell reads by `shift`, per dimension.
@@ -587,7 +587,9 @@ class IndexTransform:
                     )
                 )
             elif isinstance(m, RangeMap):
-                new_output.append(RangeMap(m.input_dimension, m.starts + s, m.lengths))
+                new_output.append(
+                    RangeMap(m.input_dimension, checked_affine(s, 1, m.starts), m.lengths)
+                )
             else:
                 new_output.append(
                     m._with_affine(m.offset + s, m.stride)  # pyright: ignore[reportPrivateUsage]
@@ -604,7 +606,7 @@ class IndexTransform:
         Integer indices must lie inside the domain and drop their input
         dimension; `None` inserts a size-1 dimension.
         """
-        return _apply_basic_indexing(_expand_ranges(self), selection)
+        return _apply_basic_indexing(self.expand_ranges(), selection)
 
     def translate_domain_by(self, shift: tuple[int, ...]) -> IndexTransform:
         """Shift the *input* domain by `shift`, preserving which cells are addressed.
@@ -670,10 +672,10 @@ class IndexTransform:
 
         Returns
         -------
-        `"none"` when no output map is an `ArrayMap`; `"orthogonal"` when every
-        `ArrayMap` has exactly one non-singleton input axis, distinct from all
-        other ArrayMaps' axes and all DimensionMap input dimensions (one
-        independent gather per axis); `"general"` otherwise —
+        `"none"` when no output map is an `ArrayMap` or `RangeMap`; `"orthogonal"`
+        when every `ArrayMap` has exactly one non-singleton input axis and every
+        `RangeMap` its input dimension, each distinct from the others and from all
+        DimensionMap input dimensions (one independent gather per axis); `"general"` otherwise —
         correlated (`vindex`) maps sharing their non-singleton axes, maps produced
         by composing fancy steps, maps sharing an input axis (a diagonal gather),
         and maps whose shape names no dependency axis. A map can have a
@@ -703,7 +705,6 @@ class IndexTransform:
         has_array = False
         for m in self.output:
             if isinstance(m, RangeMap):
-                # Runs vary over their one input axis, as an orthogonal gather does.
                 has_array = True
                 if m.input_dimension in seen:
                     return "general"
@@ -752,6 +753,14 @@ class IndexTransform:
             return self.vindex[selection]
         else:
             raise ValueError(f"Unknown mode: {mode!r}")
+
+    def expand_ranges(self) -> IndexTransform:
+        """This transform with every `RangeMap` replaced by its `ArrayMap`; itself when it has none."""
+        if not any(isinstance(m, RangeMap) for m in self.output):
+            return self
+        rank = self.input_rank
+        output = tuple(m.to_array_map(rank) if isinstance(m, RangeMap) else m for m in self.output)
+        return IndexTransform(domain=self.domain, output=output)
 
     def compose(self, inner: IndexTransform) -> IndexTransform:
         """Chain `inner` onto this transform, yielding one direct transform.
@@ -810,7 +819,7 @@ class IndexTransform:
             "input_inclusive_min": list(self.domain.inclusive_min),
             "input_exclusive_max": list(self.domain.exclusive_max),
             "input_labels": emit_labels(self.domain.labels, self.domain.ndim),
-            "output": [m.to_json() for m in _expand_ranges(self).output],
+            "output": [m.to_json() for m in self.expand_ranges().output],
         }
 
     @classmethod
@@ -906,19 +915,6 @@ class IndexTransform:
             # account of what was wrong kept, since it names the offending
             # output map and axis.
             raise NdselError("rank_mismatch", str(exc)) from exc
-
-
-def _expand_ranges(transform: IndexTransform) -> IndexTransform:
-    """`transform` with every `RangeMap` replaced by its `ArrayMap`; itself when it has none.
-
-    Operations that do not understand runs call this first, so a `RangeMap`
-    only stays compact through composition, translation and chunk planning.
-    """
-    if not any(isinstance(m, RangeMap) for m in transform.output):
-        return transform
-    rank = transform.input_rank
-    output = tuple(m.to_array_map(rank) if isinstance(m, RangeMap) else m for m in transform.output)
-    return IndexTransform(domain=transform.domain, output=output)
 
 
 def _positions_from_origin(coordinates: np.ndarray[Any, Any], origin: int) -> npt.NDArray[np.intp]:
@@ -1576,7 +1572,7 @@ class _OIndexHelper:
         self._transform = transform
 
     def __getitem__(self, selection: Any) -> IndexTransform:
-        return _apply_oindex(_expand_ranges(self._transform), selection)
+        return _apply_oindex(self._transform.expand_ranges(), selection)
 
 
 def _normalize_oindex_selection(
@@ -1723,7 +1719,7 @@ class _VIndexHelper:
         self._transform = transform
 
     def __getitem__(self, selection: Any) -> IndexTransform:
-        return _apply_vindex(_expand_ranges(self._transform), selection)
+        return _apply_vindex(self._transform.expand_ranges(), selection)
 
 
 def _broadcast_insertion_point(array_dims: Sequence[int], slice_dims: Sequence[int]) -> int:

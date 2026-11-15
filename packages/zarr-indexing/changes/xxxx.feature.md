@@ -1,0 +1,1 @@
+Add `RangeMap`, an output map holding runs of consecutive coordinates, and its chunk table `RunSet`: planning a selection of many runs costs O(runs + pieces), not O(cells). `OutputIndexMap` and `GridPartition.sets` gain a member, so code that matches them exhaustively needs a new branch.

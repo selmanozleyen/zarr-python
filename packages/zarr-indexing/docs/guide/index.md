@@ -514,10 +514,11 @@ the second row on both of its transforms:
 --8<-- "snippets/grid_partition.py:strided-tables"
 ```
 
-There are three kinds of table, matching the three map kinds and the one
+There are four kinds of table, matching the four map kinds and the one
 arrangement that does not factor. A `StridedSet` holds a `ConstantMap` or
 `DimensionMap` axis; an `IndexedSet` holds an orthogonal `ArrayMap` axis
-(`.oindex`) with its coordinates grouped by chunk; and each `JointSet` holds one connected group of index arrays. Arrays
+(`.oindex`) with its coordinates grouped by chunk; a `RunSet` holds a `RangeMap`
+axis as runs split at chunk boundaries; and each `JointSet` holds one connected group of index arrays. Arrays
 sharing request axes are sorted together; independent groups are separate
 tables in `joint_sets`. Singleton broadcast axes retain this independence. The
 [API reference](../api/chunk_resolution.md) documents every column.

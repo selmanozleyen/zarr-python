@@ -37,7 +37,7 @@ them by chunk, when `DimensionMap` does it with three integers.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -425,19 +425,21 @@ def expand_runs(
 class RangeMap:
     """Concatenated runs of consecutive output coordinates along one input axis.
 
-    Run `r` reads `starts[r], starts[r] + 1, ..., starts[r] + lengths[r] - 1`,
-    and the runs are laid end to end along `input_dimension`, counted from the
-    domain's lower bound as an `ArrayMap` is. It is the `ArrayMap` of those
-    coordinates in O(runs) space: order, repeats and overlaps are kept. Arises
-    from range selections, such as the rows of a batch of CSR rows.
+    Run `r` reads `starts[r]` through `starts[r] + lengths[r] - 1`, and the runs
+    are laid end to end along `input_dimension`, counted from the domain's lower
+    bound as an `ArrayMap` is. It is that `ArrayMap` in O(runs) space, keeping
+    order, repeats and overlaps. No selector produces one; build it and compose
+    it onto a view as an `IndexTransform` key.
 
-    Chunk planning splits the runs at chunk boundaries without expanding them;
-    every other operation expands the map to its `ArrayMap` first.
+    Composition through a unit-stride map, translation, point evaluation and
+    chunk planning keep it compact; other operations expand it to its
+    `ArrayMap`. TensorStore and ndsel have no such map, so `to_json` writes the
+    expanded `index_array`, and a transform compares unequal to its expanded form.
 
     Examples
     --------
     >>> m = RangeMap(input_dimension=0, starts=np.array([5, 0]), lengths=np.array([3, 2]))
-    >>> m.coordinates().tolist()
+    >>> m.at(np.arange(m.size)).tolist()
     [5, 6, 7, 0, 1]
     """
 
@@ -450,6 +452,9 @@ class RangeMap:
     lengths: npt.NDArray[np.intp]
     """Number of coordinates in each run; zero-length runs are allowed."""
 
+    size: int = field(init=False, repr=False)
+    """Total number of coordinates: the extent the domain has along `input_dimension`."""
+
     def __post_init__(self) -> None:
         starts = np.asarray(self.starts)
         lengths = np.asarray(self.lengths)
@@ -459,12 +464,16 @@ class RangeMap:
                 f"and {lengths.shape}"
             )
         for name, array in (("starts", starts), ("lengths", lengths)):
-            if array.size and not np.issubdtype(array.dtype, np.integer):
+            if array.size == 0:
+                array = np.empty(0, dtype=np.intp)
+            elif not np.issubdtype(array.dtype, np.integer):
                 raise TypeError(f"{name} must have an integer dtype, got {array.dtype}")
-            frozen = np.frombuffer(np.asarray(array, dtype=np.intp).tobytes(), dtype=np.intp)
+            # As `ArrayMap`: overflow raises, and immutable bytes own the snapshot.
+            frozen = np.frombuffer(checked_affine(0, 1, array).tobytes(), dtype=np.intp)
             object.__setattr__(self, name, frozen)
         if (self.lengths < 0).any():
             raise ValueError("lengths must be non-negative")
+        object.__setattr__(self, "size", int(self.lengths.sum()))
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, RangeMap):
@@ -478,20 +487,25 @@ class RangeMap:
     def __hash__(self) -> int:
         return hash((self.input_dimension, self.starts.tobytes(), self.lengths.tobytes()))
 
-    @property
-    def size(self) -> int:
-        """Total number of coordinates: the extent the domain must have along `input_dimension`."""
-        return int(self.lengths.sum())
+    def at(self, positions: npt.NDArray[np.integer[Any]]) -> npt.NDArray[np.intp]:
+        """The coordinates at zero-based `positions` along `input_dimension`, without expanding."""
+        ends = np.cumsum(self.lengths)
+        run = np.searchsorted(ends, positions, side="right")
+        return np.asarray(
+            self.starts[run] + positions - (ends[run] - self.lengths[run]), dtype=np.intp
+        )
 
-    def coordinates(self) -> npt.NDArray[np.intp]:
-        """All coordinates in order, one per input position."""
-        return expand_runs(self.starts, self.lengths)
+    def bounds(self) -> tuple[int, int]:
+        """Smallest and largest coordinate, inclusive; requires a nonzero `size`."""
+        nonempty = self.lengths > 0
+        starts = self.starts[nonempty]
+        return int(starts.min()), int((starts + self.lengths[nonempty] - 1).max())
 
     def to_array_map(self, rank: int) -> ArrayMap | ConstantMap:
         """The equivalent map at a transform's full input `rank`."""
         k = self.input_dimension
         shape = (1,) * k + (self.size,) + (1,) * (rank - k - 1)
-        return array_map_or_constant(self.coordinates().reshape(shape))
+        return array_map_or_constant(expand_runs(self.starts, self.lengths).reshape(shape))
 
 
 OutputIndexMap = ConstantMap | DimensionMap | ArrayMap | RangeMap

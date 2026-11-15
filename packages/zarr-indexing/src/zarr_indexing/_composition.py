@@ -74,11 +74,26 @@ def compose(outer: IndexTransform, inner: IndexTransform) -> IndexTransform:
 
     _validate_outer_outputs(outer, inner)
 
+    # Runs survive only as an outer map read through a unit-stride inner map.
+    inner = inner.expand_ranges()
+    expanded = outer.expand_ranges() if any(_reads_runs(outer, m) for m in inner.output) else outer
     result_output = [
-        _compose_single(outer, inner_map, inner.domain.inclusive_min) for inner_map in inner.output
+        _compose_single(expanded if _reads_runs(outer, m) else outer, m, inner.domain.inclusive_min)
+        for m in inner.output
     ]
 
     return IndexTransform(domain=outer.domain, output=tuple(result_output))
+
+
+def _reads_runs(outer: IndexTransform, inner_map: OutputIndexMap) -> bool:
+    """Whether `inner_map` evaluates an outer `RangeMap` in a way that cannot keep it compact."""
+    if isinstance(inner_map, ArrayMap):
+        return any(isinstance(m, RangeMap) for m in outer.output)
+    return (
+        isinstance(inner_map, DimensionMap)
+        and inner_map.stride != 1
+        and isinstance(outer.output[inner_map.input_dimension], RangeMap)
+    )
 
 
 def _validate_outer_outputs(outer: IndexTransform, inner: IndexTransform) -> None:
@@ -122,9 +137,7 @@ def _output_bounds(outer: IndexTransform, output_map: OutputIndexMap) -> tuple[i
         return min(first, last), max(first, last)
 
     if isinstance(output_map, RangeMap):
-        nonempty = output_map.lengths > 0
-        starts = output_map.starts[nonempty]
-        return int(starts.min()), int((starts + output_map.lengths[nonempty] - 1).max())
+        return output_map.bounds()
 
     index_lo = int(output_map.index_array.min())
     index_hi = int(output_map.index_array.max())
@@ -142,13 +155,6 @@ def _compose_single(
 
     if isinstance(inner_map, DimensionMap):
         return _compose_dimension(outer, inner_map)
-
-    if isinstance(inner_map, RangeMap):
-        # Runs are not evaluated at outer coordinates; expand and gather.
-        expanded = inner_map.to_array_map(len(inner_origin))
-        if isinstance(expanded, ConstantMap):
-            return expanded
-        return _compose_array(outer, expanded, inner_origin)
 
     return _compose_array(outer, inner_map, inner_origin)
 
@@ -175,16 +181,8 @@ def _compose_dimension(outer: IndexTransform, inner_map: DimensionMap) -> Output
         )
 
     if isinstance(outer_map, RangeMap):
-        if stride_i == 1:
-            # A unit-stride shift moves every run; the runs stay compact.
-            return RangeMap(
-                outer_map.input_dimension, outer_map.starts + offset_i, outer_map.lengths
-            )
-        # ponytail: other strides expand; a strided-run map would keep them compact.
-        expanded = outer_map.to_array_map(outer.input_rank)
-        if isinstance(expanded, ConstantMap):
-            return ConstantMap(offset=checked_affine(offset_i, stride_i, expanded.offset))
-        outer_map = expanded
+        starts = checked_affine(offset_i, 1, outer_map.starts)
+        return RangeMap(outer_map.input_dimension, starts, outer_map.lengths)
 
     # Affine post-composition leaves the index array (and hence its full
     # input rank and dependency axes) untouched.
@@ -228,11 +226,6 @@ def _positions_for_axis(
         return outer_map.offset - inner_origin
     if isinstance(outer_map, DimensionMap):
         return _dimension_positions(outer, outer_map, inner_origin)
-    if isinstance(outer_map, RangeMap):
-        expanded = outer_map.to_array_map(outer.input_rank)
-        if isinstance(expanded, ConstantMap):
-            return expanded.offset - inner_origin
-        return _array_positions(expanded, inner_origin)
     return _array_positions(outer_map, inner_origin)
 
 
