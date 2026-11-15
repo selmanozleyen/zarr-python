@@ -16,6 +16,7 @@ from zarr_indexing.chunk_resolution import ChunkProjection  # noqa: TC001 (runti
 from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap, OutputIndexMap
 from zarr_indexing.transform import (
     IndexTransform,
+    _expand_ranges,  # pyright: ignore[reportPrivateUsage]
 )
 
 __all__ = [
@@ -59,6 +60,8 @@ class ReadContext:
     """
 
     def __post_init__(self) -> None:
+        # Readers lower index maps through NumPy; runs reach them expanded.
+        object.__setattr__(self, "transform", _expand_ranges(self.transform))
         origin = self.transform.domain.inclusive_min
         if any(origin):
             object.__setattr__(

@@ -170,7 +170,7 @@ from zarr_indexing.chunk_resolution import (
 from zarr_indexing.domain import IndexDomain
 from zarr_indexing.errors import BoundsCheckError
 from zarr_indexing.grid import DimensionGrid, FixedDimension, dimension_grids_from_chunks
-from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap
+from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap, RangeMap
 from zarr_indexing.reader import (
     ReadContext,
     Reader,
@@ -760,7 +760,7 @@ class LazyArray:
         >>> (array[1:, ::2].is_box, array.oindex[[2, 0], :].is_box)
         (True, False)
         """
-        return not any(isinstance(m, ArrayMap) for m in self._transform.output)
+        return not any(isinstance(m, (ArrayMap, RangeMap)) for m in self._transform.output)
 
     def bounding_box(self) -> tuple[tuple[int, int], ...] | None:
         """The storage region this view touches, one interval per storage dimension.
@@ -812,6 +812,10 @@ class LazyArray:
                 first = m.offset + m.stride * domain.inclusive_min[d]
                 last = m.offset + m.stride * (domain.exclusive_max[d] - 1)
                 bounds.append((min(first, last), max(first, last) + 1))
+            elif isinstance(m, RangeMap):
+                nonempty = m.lengths > 0
+                starts = m.starts[nonempty]
+                bounds.append((int(starts.min()), int((starts + m.lengths[nonempty]).max())))
             else:
                 coords = m.offset + m.stride * m.index_array
                 bounds.append((int(coords.min()), int(coords.max()) + 1))

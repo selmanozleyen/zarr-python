@@ -408,4 +408,90 @@ def array_map_or_constant(
     return ArrayMap(index_array=arr, offset=offset, stride=stride)
 
 
-OutputIndexMap = ConstantMap | DimensionMap | ArrayMap
+def expand_runs(
+    starts: npt.NDArray[np.intp], lengths: npt.NDArray[np.intp]
+) -> npt.NDArray[np.intp]:
+    """The coordinates of consecutive runs, concatenated in order.
+
+    >>> expand_runs(np.array([5, 0]), np.array([3, 2])).tolist()
+    [5, 6, 7, 0, 1]
+    """
+    total = int(lengths.sum())
+    run_offset = np.repeat(starts - (np.cumsum(lengths) - lengths), lengths)
+    return np.asarray(run_offset + np.arange(total, dtype=np.intp), dtype=np.intp)
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class RangeMap:
+    """Concatenated runs of consecutive output coordinates along one input axis.
+
+    Run `r` reads `starts[r], starts[r] + 1, ..., starts[r] + lengths[r] - 1`,
+    and the runs are laid end to end along `input_dimension`, counted from the
+    domain's lower bound as an `ArrayMap` is. It is the `ArrayMap` of those
+    coordinates in O(runs) space: order, repeats and overlaps are kept. Arises
+    from range selections, such as the rows of a batch of CSR rows.
+
+    Chunk planning splits the runs at chunk boundaries without expanding them;
+    every other operation expands the map to its `ArrayMap` first.
+
+    Examples
+    --------
+    >>> m = RangeMap(input_dimension=0, starts=np.array([5, 0]), lengths=np.array([3, 2]))
+    >>> m.coordinates().tolist()
+    [5, 6, 7, 0, 1]
+    """
+
+    input_dimension: int
+    """The input axis the runs are laid along."""
+
+    starts: npt.NDArray[np.intp]
+    """First output coordinate of each run."""
+
+    lengths: npt.NDArray[np.intp]
+    """Number of coordinates in each run; zero-length runs are allowed."""
+
+    def __post_init__(self) -> None:
+        starts = np.asarray(self.starts)
+        lengths = np.asarray(self.lengths)
+        if starts.ndim != 1 or starts.shape != lengths.shape:
+            raise ValueError(
+                f"starts and lengths must be 1-D and equally long, got {starts.shape} "
+                f"and {lengths.shape}"
+            )
+        for name, array in (("starts", starts), ("lengths", lengths)):
+            if array.size and not np.issubdtype(array.dtype, np.integer):
+                raise TypeError(f"{name} must have an integer dtype, got {array.dtype}")
+            frozen = np.frombuffer(np.asarray(array, dtype=np.intp).tobytes(), dtype=np.intp)
+            object.__setattr__(self, name, frozen)
+        if (self.lengths < 0).any():
+            raise ValueError("lengths must be non-negative")
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, RangeMap):
+            return NotImplemented
+        return (
+            self.input_dimension == other.input_dimension
+            and bool(np.array_equal(self.starts, other.starts))
+            and bool(np.array_equal(self.lengths, other.lengths))
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.input_dimension, self.starts.tobytes(), self.lengths.tobytes()))
+
+    @property
+    def size(self) -> int:
+        """Total number of coordinates: the extent the domain must have along `input_dimension`."""
+        return int(self.lengths.sum())
+
+    def coordinates(self) -> npt.NDArray[np.intp]:
+        """All coordinates in order, one per input position."""
+        return expand_runs(self.starts, self.lengths)
+
+    def to_array_map(self, rank: int) -> ArrayMap | ConstantMap:
+        """The equivalent map at a transform's full input `rank`."""
+        k = self.input_dimension
+        shape = (1,) * k + (self.size,) + (1,) * (rank - k - 1)
+        return array_map_or_constant(self.coordinates().reshape(shape))
+
+
+OutputIndexMap = ConstantMap | DimensionMap | ArrayMap | RangeMap

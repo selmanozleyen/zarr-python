@@ -9,7 +9,7 @@ Key types:
 
 - `IndexDomain` — a rectangular region of integer coordinates
 - `IndexTransform` — maps input coordinates to storage coordinates
-- `ConstantMap`, `DimensionMap`, `ArrayMap` — the three ways a single
+- `ConstantMap`, `DimensionMap`, `ArrayMap`, `RangeMap` — the ways a single
   output dimension can depend on the input (see `output_map.py`)
 - `IndexTransform.compose` — chain two transforms into one
 
@@ -35,6 +35,7 @@ from zarr_indexing.chunk_resolution import (
     GridPartition,
     IndexedSet,
     JointSet,
+    RunSet,
     StridedSet,
     plan_chunks,
 )
@@ -63,6 +64,7 @@ from zarr_indexing.output_map import (
     ConstantMap,
     DimensionMap,
     OutputIndexMap,
+    RangeMap,
     output_index_map_from_json,
 )
 from zarr_indexing.reader import (
@@ -110,8 +112,10 @@ __all__ = [
     "OutputIndexMap",
     "OutputIndexMapJSON",
     "Partition",
+    "RangeMap",
     "ReadContext",
     "Reader",
+    "RunSet",
     "StridedSet",
     "UnitStepReader",
     "VaryingDimension",

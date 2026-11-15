@@ -32,6 +32,7 @@ from zarr_indexing.output_map import (
     ConstantMap,
     DimensionMap,
     OutputIndexMap,
+    RangeMap,
     array_map_or_constant,
 )
 from zarr_indexing.transform import IndexTransform
@@ -120,6 +121,11 @@ def _output_bounds(outer: IndexTransform, output_map: OutputIndexMap) -> tuple[i
         last = output_map.offset + output_map.stride * (input_hi - 1)
         return min(first, last), max(first, last)
 
+    if isinstance(output_map, RangeMap):
+        nonempty = output_map.lengths > 0
+        starts = output_map.starts[nonempty]
+        return int(starts.min()), int((starts + output_map.lengths[nonempty] - 1).max())
+
     index_lo = int(output_map.index_array.min())
     index_hi = int(output_map.index_array.max())
     first = output_map.offset + output_map.stride * index_lo
@@ -137,7 +143,13 @@ def _compose_single(
     if isinstance(inner_map, DimensionMap):
         return _compose_dimension(outer, inner_map)
 
-    # inner_map: ArrayMap (OutputIndexMap = ConstantMap | DimensionMap | ArrayMap)
+    if isinstance(inner_map, RangeMap):
+        # Runs are not evaluated at outer coordinates; expand and gather.
+        expanded = inner_map.to_array_map(len(inner_origin))
+        if isinstance(expanded, ConstantMap):
+            return expanded
+        return _compose_array(outer, expanded, inner_origin)
+
     return _compose_array(outer, inner_map, inner_origin)
 
 
@@ -162,7 +174,18 @@ def _compose_dimension(outer: IndexTransform, inner_map: DimensionMap) -> Output
             stride=stride_i * outer_map.stride,
         )
 
-    # outer_map: ArrayMap (OutputIndexMap = ConstantMap | DimensionMap | ArrayMap)
+    if isinstance(outer_map, RangeMap):
+        if stride_i == 1:
+            # A unit-stride shift moves every run; the runs stay compact.
+            return RangeMap(
+                outer_map.input_dimension, outer_map.starts + offset_i, outer_map.lengths
+            )
+        # ponytail: other strides expand; a strided-run map would keep them compact.
+        expanded = outer_map.to_array_map(outer.input_rank)
+        if isinstance(expanded, ConstantMap):
+            return ConstantMap(offset=checked_affine(offset_i, stride_i, expanded.offset))
+        outer_map = expanded
+
     # Affine post-composition leaves the index array (and hence its full
     # input rank and dependency axes) untouched.
     return ArrayMap(
@@ -205,6 +228,11 @@ def _positions_for_axis(
         return outer_map.offset - inner_origin
     if isinstance(outer_map, DimensionMap):
         return _dimension_positions(outer, outer_map, inner_origin)
+    if isinstance(outer_map, RangeMap):
+        expanded = outer_map.to_array_map(outer.input_rank)
+        if isinstance(expanded, ConstantMap):
+            return expanded.offset - inner_origin
+        return _array_positions(expanded, inner_origin)
     return _array_positions(outer_map, inner_origin)
 
 

@@ -23,6 +23,8 @@ so each axis is resolved once against its grid into a table:
   the first cell, and whether the row covers its chunk exactly once.
 - `IndexedSet` — an orthogonal `ArrayMap` axis: its coordinates grouped by
   chunk in CSR form, with the request positions they fill.
+- `RunSet` — a `RangeMap` axis: its runs split at chunk boundaries into
+  pieces, grouped by chunk in CSR form, in O(runs + pieces) without expanding.
 - `JointSet` — one connected index-array component. Arrays sharing input
   axes are grouped together; independent components remain separate tables.
 
@@ -47,9 +49,17 @@ import numpy as np
 
 from zarr_indexing._affine import checked_affine
 from zarr_indexing.domain import IndexDomain
-from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap, OutputIndexMap
+from zarr_indexing.output_map import (
+    ArrayMap,
+    ConstantMap,
+    DimensionMap,
+    OutputIndexMap,
+    RangeMap,
+    expand_runs,
+)
 from zarr_indexing.transform import (
     IndexTransform,
+    _expand_ranges,  # pyright: ignore[reportPrivateUsage]
     _intersect_dimension_map,  # pyright: ignore[reportPrivateUsage]
     _prepare_correlated,  # pyright: ignore[reportPrivateUsage]
 )
@@ -456,6 +466,80 @@ class IndexedSet:
 
 
 @dataclass(frozen=True, slots=True)
+class RunSet:
+    """One output dimension read through a `RangeMap`, one row per chunk.
+
+    Each run is split at chunk boundaries into pieces, and the pieces are
+    grouped by chunk in CSR form: row ``i`` owns pieces
+    ``pointer[i]:pointer[i + 1]``, in request order. Piece ``j`` reads
+    ``length[j]`` consecutive chunk-local coordinates starting at
+    ``local_start[j]`` into the request positions starting at ``position[j]``,
+    counted from the request axis's lower bound. The table is O(runs + pieces):
+    no column has an entry per cell. Columns are read-only NumPy arrays.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from zarr_indexing import IndexDomain, IndexTransform, RangeMap, plan_chunks
+    >>> from zarr_indexing.grid import dimension_grids_from_chunks
+    >>> grids = dimension_grids_from_chunks((4,), shape=(10,))
+    >>> runs = RangeMap(0, starts=np.array([6, 1]), lengths=np.array([3, 2]))
+    >>> transform = IndexTransform(IndexDomain.from_shape((5,)), (runs,))
+    >>> (axis,) = plan_chunks(transform, grids).partition().sets
+    >>> axis.chunk.tolist(), axis.pointer.tolist()
+    ([0, 1, 2], [0, 1, 2, 3])
+    >>> axis.local_start.tolist(), axis.length.tolist(), axis.position.tolist()
+    ([1, 2, 0], [2, 2, 1], [3, 0, 2])
+    """
+
+    output_dimension: int
+    """The storage axis this table describes."""
+
+    input_dimension: int
+    """The request axis the runs are laid along."""
+
+    chunk: np.ndarray[Any, np.dtype[np.intp]]
+    """Chunk index along the axis, one per row, ascending."""
+
+    chunk_start: np.ndarray[Any, np.dtype[np.intp]]
+    """Storage origin of each chunk."""
+
+    chunk_extent: np.ndarray[Any, np.dtype[np.intp]]
+    """Data extent of each chunk."""
+
+    pointer: np.ndarray[Any, np.dtype[np.intp]]
+    """CSR row pointer: row ``i`` owns pieces ``pointer[i]`` to ``pointer[i + 1]``."""
+
+    local_start: np.ndarray[Any, np.dtype[np.intp]]
+    """Chunk-local storage coordinate of each piece's first cell."""
+
+    length: np.ndarray[Any, np.dtype[np.intp]]
+    """Cells in each piece."""
+
+    position: np.ndarray[Any, np.dtype[np.intp]]
+    """Request position of each piece's first cell."""
+
+    def __post_init__(self) -> None:
+        _own_columns(
+            self,
+            "chunk",
+            "chunk_start",
+            "chunk_extent",
+            "pointer",
+            "local_start",
+            "length",
+            "position",
+        )
+
+    def __len__(self) -> int:
+        return int(self.chunk.size)
+
+    def run(self, row: int) -> slice:
+        """The slice of the piece columns a row owns."""
+        return slice(int(self.pointer[row]), int(self.pointer[row + 1]))
+
+
+@dataclass(frozen=True, slots=True)
 class JointSet:
     """One connected component of index arrays, grouped by the chunk each point lands in.
 
@@ -681,6 +765,42 @@ def _indexed_set(out_dim: int, m: ArrayMap, dg: DimensionGridLike) -> IndexedSet
     )
 
 
+def _run_set(out_dim: int, m: RangeMap, dg: DimensionGridLike) -> RunSet:
+    keep = m.lengths > 0
+    starts = m.starts[keep]
+    stops = starts + m.lengths[keep]
+    position = (np.cumsum(m.lengths) - m.lengths)[keep]
+    # Probe the extreme coordinates with the scalar lookup first, as
+    # `_indexed_set` does: its error names the offending coordinate.
+    dg.index_to_chunk(int(starts.min()))
+    dg.index_to_chunk(int((stops - 1).max()))
+    first = dg.indices_to_chunks(starts)
+    count = dg.indices_to_chunks(stops - 1) - first + 1
+    # One piece per (run, chunk the run crosses), in request order.
+    run = np.repeat(np.arange(starts.size, dtype=np.intp), count)
+    step = np.arange(run.size, dtype=np.intp) - np.repeat(np.cumsum(count) - count, count)
+    chunk = np.repeat(first, count) + step
+    unique, inverse = np.unique(chunk, return_inverse=True)
+    unique_start, unique_extent = _chunk_bounds(dg, np.asarray(unique, dtype=np.intp))
+    c_start = unique_start[inverse]
+    lo = np.maximum(starts[run], c_start)
+    hi = np.minimum(stops[run], c_start + unique_extent[inverse])
+    nonempty = hi > lo  # a zero-extent grid cell inside a run holds no piece
+    order = np.argsort(inverse[nonempty], kind="stable")
+    rows, counts = np.unique(inverse[nonempty][order], return_counts=True)
+    return RunSet(
+        output_dimension=out_dim,
+        input_dimension=m.input_dimension,
+        chunk=np.asarray(unique[rows], dtype=np.intp),
+        chunk_start=unique_start[rows],
+        chunk_extent=unique_extent[rows],
+        pointer=np.concatenate([[0], np.cumsum(counts)]).astype(np.intp),
+        local_start=(lo - c_start)[nonempty][order],
+        length=(hi - lo)[nonempty][order],
+        position=(position[run] + lo - starts[run])[nonempty][order],
+    )
+
+
 def _chunk_keys(
     chunk_ids: Sequence[np.ndarray[Any, np.dtype[np.intp]]],
 ) -> np.ndarray[Any, np.dtype[np.intp]]:
@@ -814,6 +934,43 @@ def _indexed_piece(axis: IndexedSet, row: int, rank: int, origin: int) -> _AxisP
     )
 
 
+def _run_piece(axis: RunSet, row: int, rank: int, origin: int) -> _AxisPiece:
+    """One row of a run table: a slice when the chunk holds one piece, else index arrays.
+
+    Expanding a row costs as much as reading it, so rows expand while the
+    table itself stays O(runs + pieces).
+    """
+    run = axis.run(row)
+    k = axis.input_dimension
+    c_start = int(axis.chunk_start[row])
+    c_extent = int(axis.chunk_extent[row])
+    local, length, position = axis.local_start[run], axis.length[run], axis.position[run]
+    count = int(length.sum())
+    if local.size == 1:
+        start = int(local[0])
+        return (
+            int(axis.chunk[row]),
+            c_start,
+            c_extent,
+            k,
+            count,
+            DimensionMap(input_dimension=k, offset=start),
+            DimensionMap(input_dimension=k, offset=origin + int(position[0])),
+            start == 0 and count == c_extent,
+        )
+    shape = (1,) * k + (count,) + (1,) * (rank - k - 1)
+    return (
+        int(axis.chunk[row]),
+        c_start,
+        c_extent,
+        k,
+        count,
+        ArrayMap(index_array=expand_runs(local, length).reshape(shape)),
+        ArrayMap(index_array=expand_runs(position, length).reshape(shape), offset=origin),
+        False,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class GridPartition:
     """A plan in factored form: per-axis tables whose product is the chunk walk.
@@ -851,7 +1008,7 @@ class GridPartition:
     dimension_grids: tuple[DimensionGridLike, ...]
     """One grid per storage dimension."""
 
-    sets: tuple[StridedSet | IndexedSet, ...]
+    sets: tuple[StridedSet | IndexedSet | RunSet, ...]
     """Independent per-axis tables, in output-dimension order."""
 
     joint_sets: tuple[JointSet, ...]
@@ -887,13 +1044,15 @@ class GridPartition:
 
     # -- factorized assembly ------------------------------------------------
 
-    def _pieces(self, axis: StridedSet | IndexedSet, row: int) -> _AxisPiece:
+    def _pieces(self, axis: StridedSet | IndexedSet | RunSet, row: int) -> _AxisPiece:
         domain = self.transform.domain
         if isinstance(axis, StridedSet):
             origin = (
                 0 if axis.input_dimension is None else domain.inclusive_min[axis.input_dimension]
             )
             return _strided_piece(axis, row, origin)
+        if isinstance(axis, RunSet):
+            return _run_piece(axis, row, domain.ndim, domain.inclusive_min[axis.input_dimension])
         return _indexed_piece(axis, row, domain.ndim, domain.inclusive_min[axis.input_dimension])
 
     def _unbound(self) -> tuple[list[OutputIndexMap | None], bool]:
@@ -1126,7 +1285,7 @@ def _shared_input_axis(transform: IndexTransform) -> int | None:
     seen: set[int] = set()
     correlated = transform.index_array_structure == "general"
     for m in transform.output:
-        if isinstance(m, DimensionMap):
+        if isinstance(m, (DimensionMap, RangeMap)):
             axis: int | None = m.input_dimension
         elif isinstance(m, ArrayMap) and not correlated:
             axis = m.dependent_axis
@@ -1155,9 +1314,14 @@ def _partition_transform(
             transform=transform, dimension_grids=grids, sets=(), joint_sets=(), row_shape=(0,)
         )
     correlated = transform.index_array_structure == "general"
-    sets: list[StridedSet | IndexedSet] = []
+    if correlated:
+        # ponytail: runs beside correlated index arrays expand; the joint walk has no run table.
+        transform = _expand_ranges(transform)
+    sets: list[StridedSet | IndexedSet | RunSet] = []
     for out_dim, m in enumerate(transform.output):
-        if isinstance(m, ArrayMap):
+        if isinstance(m, RangeMap):
+            sets.append(_run_set(out_dim, m, grids[out_dim]))
+        elif isinstance(m, ArrayMap):
             if correlated:
                 continue
             sets.append(_indexed_set(out_dim, m, grids[out_dim]))
