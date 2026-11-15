@@ -7,15 +7,19 @@ import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
+import zarr_indexing._composition
+import zarr_indexing.chunk_resolution
+import zarr_indexing.output_map
 from zarr_indexing import (
     ArrayMap,
+    BoundsCheckError,
     ConstantMap,
     DimensionMap,
     IndexDomain,
     IndexTransform,
     LazyArray,
     RangeMap,
-    RunSet,
+    RangeSet,
     plan_chunks,
 )
 from zarr_indexing.grid import dimension_grids_from_chunks
@@ -59,17 +63,36 @@ def test_result_matches_numpy(case: tuple[int, int, list[int], list[int], tuple[
     np.testing.assert_array_equal(view.unpartitioned().result(), expected)
 
 
-def test_plan_is_linear_in_runs_not_cells() -> None:
-    # 2e9 cells over a 1e12-long axis: an expanded plan would not fit in memory.
+@pytest.fixture
+def expanded_cells(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Cells expanded from runs during the test, one entry per expansion."""
+    cells: list[int] = []
+    real = zarr_indexing.output_map._expand_runs
+
+    def spy(starts: Any, lengths: Any) -> Any:
+        cells.append(int(lengths.sum()))
+        return real(starts, lengths)
+
+    for module in (
+        zarr_indexing.output_map,
+        zarr_indexing._composition,
+        zarr_indexing.chunk_resolution,
+    ):
+        monkeypatch.setattr(module, "_expand_runs", spy)
+    return cells
+
+
+def test_plan_is_linear_in_runs_not_cells(expanded_cells: list[int]) -> None:
     n = 10**12
     m = RangeMap(0, np.array([0, n - 10**9]), np.array([10**9, 10**9]))
     transform = IndexTransform(IndexDomain.from_shape((m.size,)), (m,))
     (axis,) = (
         plan_chunks(transform, dimension_grids_from_chunks((10**6,), shape=(n,))).partition().sets
     )
-    assert isinstance(axis, RunSet)
-    assert axis.length.size == 2000
-    assert int(axis.length.sum()) == m.size
+    assert isinstance(axis, RangeSet)
+    assert axis.extent.size == 2000
+    assert int(axis.extent.sum()) == m.size
+    assert expanded_cells == []
 
 
 def test_run_set_pieces() -> None:
@@ -77,11 +100,11 @@ def test_run_set_pieces() -> None:
     transform = runs_transform([6, 1], [3, 2], 1)
     plan = plan_chunks(transform, dimension_grids_from_chunks((4, 1), shape=(10, 1)))
     axis = plan.partition().sets[0]
-    assert isinstance(axis, RunSet)
+    assert isinstance(axis, RangeSet)
     assert axis.chunk.tolist() == [0, 1, 2]
     assert axis.local_start.tolist() == [1, 2, 0]
-    assert axis.length.tolist() == [2, 2, 1]
-    assert axis.position.tolist() == [3, 0, 2]
+    assert axis.extent.tolist() == [2, 2, 1]
+    assert axis.origin.tolist() == [3, 0, 2]
     # A chunk with one piece is a slice, so the part is a box.
     assert all(isinstance(p.chunk_transform.output[0], DimensionMap) for p in plan)
 
@@ -107,14 +130,6 @@ def test_compose_onto_strided_view_expands() -> None:
     view = LazyArray.from_numpy(source)[::2][runs_transform([3, 0], [4, 2], 3)]
     assert isinstance(view.transform.output[0], ArrayMap)
     np.testing.assert_array_equal(view.result(), source[::2][oracle([3, 0], [4, 2])])
-
-
-def test_further_selection_expands() -> None:
-    source = np.arange(40 * 3).reshape(40, 3)
-    view = LazyArray.from_numpy(source)[runs_transform([30, 2], [4, 6], 3)]
-    expected = source[oracle([30, 2], [4, 6])]
-    np.testing.assert_array_equal(view[2:7, ::-1].result(), expected[2:7, ::-1])
-    np.testing.assert_array_equal(view.oindex[[0, 9], [2]].result(), expected[np.ix_([0, 9], [2])])
 
 
 def test_beside_correlated_index_arrays() -> None:
@@ -190,7 +205,7 @@ def test_transform_validation() -> None:
 
 
 def test_out_of_bounds_run_is_rejected() -> None:
-    with pytest.raises(Exception, match="outside"):
+    with pytest.raises(BoundsCheckError, match="outside"):
         LazyArray.from_numpy(np.zeros((4, 1)))[runs_transform([2], [3], 1)]
 
 
@@ -214,6 +229,11 @@ def test_snapshot_ignores_caller_mutation() -> None:
 def test_overflow_raises() -> None:
     with pytest.raises(OverflowError):
         RangeMap(0, np.array([2**63], dtype=np.uint64), np.array([1]))
+    with pytest.raises(OverflowError, match="cells"):
+        RangeMap(0, np.zeros(3, dtype=np.intp), np.array([2**63 - 1, 2**63 - 1, 2]))
+    with pytest.raises(OverflowError, match="ends past"):
+        RangeMap(0, np.array([2**63 - 5]), np.array([10]))
+    assert RangeMap(0, np.array([2**63 - 5]), np.array([5])).bounds() == (2**63 - 5, 2**63 - 1)
     m = RangeMap(0, np.array([2**62]), np.array([1]))
     t = IndexTransform(IndexDomain.from_shape((1,)), (m,))
     with pytest.raises(OverflowError):
@@ -238,7 +258,7 @@ def test_adjacent_runs_merge() -> None:
     transform = runs_transform([0, 2], [2, 2], 1)
     plan = plan_chunks(transform, dimension_grids_from_chunks((4, 1), shape=(4, 1)))
     axis = plan.partition().sets[0]
-    assert isinstance(axis, RunSet)
+    assert isinstance(axis, RangeSet)
     assert axis.counts.tolist() == [1]
     (projection,) = list(plan)
     assert isinstance(projection.chunk_transform.output[0], DimensionMap)
@@ -372,10 +392,149 @@ def test_newaxis_renumbers_runs() -> None:
     np.testing.assert_array_equal(view.result(), ROWS[None, 2:12])
 
 
-def test_window_of_huge_runs_does_not_expand() -> None:
-    # A window over 2e9 cells is O(runs); expanding would not fit in memory.
+def test_window_of_huge_runs_does_not_expand(expanded_cells: list[int]) -> None:
     m = RangeMap(0, np.array([0, 10**12]), np.array([10**9, 10**9]))
     transform = IndexTransform(IndexDomain.from_shape((m.size,)), (m,))
     window = transform[10**9 - 2 : 10**9 + 3]
     assert window.output[0] == RangeMap(0, np.array([10**9 - 2, 10**12]), np.array([2, 3]))
     assert transform[10**9 + 7].output[0] == ConstantMap(10**12 + 7)
+    assert expanded_cells == []
+
+
+def test_oindex_on_other_axis_does_not_expand_runs(expanded_cells: list[int]) -> None:
+    # Rows by genes: columns picked first, then a runs key over the rows.
+    source = np.arange(40 * 3).reshape(40, 3)
+    view = LazyArray.from_numpy(source).oindex[:, [0, 2]][runs_transform([30, 2, 10], [4, 6, 5], 2)]
+    assert isinstance(view.transform.output[0], RangeMap)
+    assert expanded_cells == []
+    np.testing.assert_array_equal(
+        view.result(), source[np.ix_(oracle([30, 2, 10], [4, 6, 5]), [0, 2])]
+    )
+
+
+def test_runs_onto_runs_stay_runs(expanded_cells: list[int]) -> None:
+    view = run_view()[runs_transform([12, 0, 3], [3, 2, 5], 3)]
+    assert isinstance(view.transform.output[0], RangeMap)
+    assert expanded_cells == []
+    np.testing.assert_array_equal(view.result(), ROWS[oracle([12, 0, 3], [3, 2, 5])])
+
+
+def test_empty_key_onto_run_view() -> None:
+    # An empty key may address coordinates outside the view, as an empty slice may.
+    key = IndexTransform(IndexDomain.from_shape((20, 0)), (DimensionMap(0), DimensionMap(1)))
+    assert run_view()[key].result().shape == (20, 0)
+
+
+def test_merge_needs_contiguous_request_positions() -> None:
+    # [0, 2) and [2, 4) touch in storage but are not neighbours in the request.
+    source = np.arange(8).reshape(8, 1)
+    view = LazyArray.from_numpy(source).with_parts((4, 1))[runs_transform([0, 5, 2], [2, 1, 2], 1)]
+    np.testing.assert_array_equal(view.result(), source[[0, 1, 5, 2, 3]])
+
+
+@st.composite
+def run_views(draw: st.DrawFn) -> tuple[LazyArray, np.ndarray[Any, Any]]:
+    """A view holding runs on any axis of a rank 1-3 domain with a nonzero origin, and its values."""
+    rank = draw(st.integers(1, 3))
+    k = draw(st.integers(0, rank - 1))
+    extents = [draw(st.integers(1, 3)) for _ in range(rank)]
+    extents[k] = draw(st.integers(1, 20))
+    starts = draw(st.lists(st.integers(0, extents[k] - 1), max_size=6))
+    lengths = [draw(st.integers(0, extents[k] - s)) for s in starts]
+    origins = [draw(st.integers(-5, 5)) for _ in range(rank)]
+    parts = tuple(draw(st.integers(1, e)) for e in extents)
+    source = np.arange(int(np.prod(extents))).reshape(extents)
+    m = RangeMap(k, np.array(starts, dtype=np.intp), np.array(lengths, dtype=np.intp))
+    shape = [m.size if j == k else e for j, e in enumerate(extents)]
+    domain = IndexDomain(
+        inclusive_min=tuple(origins),
+        exclusive_max=tuple(o + n for o, n in zip(origins, shape, strict=True)),
+    )
+    output = tuple(m if j == k else DimensionMap(j, offset=-origins[j]) for j in range(rank))
+    view = LazyArray.from_numpy(source).with_parts(parts)[IndexTransform(domain, output)]
+    return view, np.take(source, oracle(starts, lengths), axis=k)
+
+
+def runs_key(
+    domain: IndexDomain, axis: int, starts: list[int], lengths: list[int], origin: int
+) -> IndexTransform:
+    """A key reading runs at positions of `axis` of a view with `domain`, in its literal frame."""
+    lo = domain.inclusive_min[axis]
+    m = RangeMap(axis, np.array(starts, dtype=np.intp) + lo, np.array(lengths, dtype=np.intp))
+    key_min = list(domain.inclusive_min)
+    key_max = list(domain.exclusive_max)
+    key_min[axis], key_max[axis] = origin, origin + m.size
+    output = tuple(m if j == axis else DimensionMap(j) for j in range(domain.ndim))
+    return IndexTransform(
+        IndexDomain(inclusive_min=tuple(key_min), exclusive_max=tuple(key_max)), output
+    )
+
+
+@settings(deadline=None)
+@given(case=run_views(), data=st.data())
+def test_chained_selections_match_numpy(
+    case: tuple[LazyArray, np.ndarray[Any, Any]], data: st.DataObject
+) -> None:
+    # Every step is checked against the same step on a plain view of the values.
+    view, values = case
+    plain = LazyArray.from_numpy(values)
+    np.testing.assert_array_equal(view.result(), values)
+    for _ in range(data.draw(st.integers(1, 3))):
+        if view.ndim == 0 or 0 in view.shape:
+            break
+        step = data.draw(st.sampled_from([*sorted(SELECTIONS), "runs"]))
+        if step == "runs":
+            axis = data.draw(st.integers(0, view.ndim - 1))
+            extent = view.shape[axis]
+            starts = data.draw(st.lists(st.integers(0, extent - 1), max_size=4))
+            lengths = [data.draw(st.integers(0, extent - s)) for s in starts]
+            origin = data.draw(st.integers(-5, 5))
+            view = view[runs_key(view.transform.domain, axis, starts, lengths, origin)]
+            plain = LazyArray.from_numpy(
+                np.take(plain.result(), oracle(starts, lengths), axis=axis)
+            )
+        else:
+            strategy, accessor = SELECTIONS[step]
+            selection = data.draw(strategy(view.shape))
+            view, plain = accessor(view)[selection], accessor(plain)[selection]
+        np.testing.assert_array_equal(view.result(), plain.result())
+
+
+def test_pickle_round_trip_owns_read_only_arrays() -> None:
+    import pickle
+
+    m = pickle.loads(pickle.dumps(RangeMap(0, np.array([1, 7]), np.array([5, 2]))))
+    assert m == RangeMap(0, np.array([1, 7]), np.array([5, 2]))
+    assert m.size == 7
+    assert not m.starts.flags.writeable
+    assert not m.lengths.flags.writeable
+
+
+def test_map_to_json_refuses_and_transform_to_json_expands() -> None:
+    transform = runs_transform([6, 1], [3, 2], 1)
+    with pytest.raises(TypeError, match="IndexTransform.to_json"):
+        transform.output[0].to_json()
+    assert transform.to_json()["output"][0]["index_array"] == [[6], [7], [8], [1], [2]]
+
+
+@pytest.mark.parametrize("reader", ["basic_reader", "unit_step_reader", "numpy_reader"])
+def test_readers_accept_runs_directly(reader: str) -> None:
+    import zarr_indexing
+
+    transform = IndexTransform(
+        IndexDomain.from_shape((5,)), (RangeMap(0, np.array([6, 1]), np.array([3, 2])),)
+    )
+    out = np.empty(5, dtype=int)
+    getattr(zarr_indexing, reader).read_into(
+        np.arange(10), zarr_indexing.ReadContext(transform), out
+    )
+    assert out.tolist() == [6, 7, 8, 1, 2]
+
+
+def test_dask_token_is_compact(expanded_cells: list[int]) -> None:
+    pytest.importorskip("dask")
+    m = RangeMap(0, np.array([0, 10**6]), np.array([10**6, 10**6]))
+    source = LazyArray.from_numpy(np.zeros(2 * 10**6))
+    view = source[IndexTransform(IndexDomain.from_shape((m.size,)), (m,))]
+    view.__dask_tokenize__()
+    assert expanded_cells == []

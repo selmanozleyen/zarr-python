@@ -1279,7 +1279,8 @@ class LazyArray:
         its JSON is not embedded in the returned token, but is allocated while
         computing the digest. Equal serialized transforms and equal source
         tokens produce equal tokens; arbitrary semantically equivalent mappings
-        are not guaranteed to serialize identically.
+        are not guaranteed to serialize identically. A `RangeMap` contributes its
+        runs rather than its expanded coordinates.
 
         Dask tokenizes the wrapped source using its normal dispatch and
         determinism policy. This may read or hash source values. Dask is
@@ -1289,7 +1290,20 @@ class LazyArray:
         """
         from dask.base import tokenize  # pyright: ignore[reportMissingImports]
 
-        canonical = json.dumps(self._transform.to_json(), sort_keys=True)
+        transform = self._transform
+        if any(isinstance(m, RangeMap) for m in transform.output):
+            body: Any = {
+                "domain": transform.domain.to_json(),
+                "output": [
+                    [m.input_dimension, m.starts.tolist(), m.lengths.tolist()]
+                    if isinstance(m, RangeMap)
+                    else m.to_json()
+                    for m in transform.output
+                ],
+            }
+        else:
+            body = transform.to_json()
+        canonical = json.dumps(body, sort_keys=True)
         return (
             type(self).__qualname__,
             tokenize(self._array),

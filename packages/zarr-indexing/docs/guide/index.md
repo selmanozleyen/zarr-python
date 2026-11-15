@@ -168,10 +168,11 @@ values flow source → request, against the arrow. The neutral names exist
 because transforms compose — in a chain, an interior transform's output space
 is just the next transform's input space, neither a request nor a source.
 
-### The three map kinds, in NumPy terms
+### The map kinds, in NumPy terms
 
-Every output dimension is produced by one of three map forms. Each has a
-NumPy counterpart, shown executably below. The examples share one helper —
+Every output dimension is produced by one of three map forms, or by a
+`RangeMap`, which stores the `ArrayMap` of `np.r_[s0:e0, s1:e1, ...]` per run.
+The three have NumPy counterparts, shown executably below. The examples share one helper —
 and it doubles as the answer to how a bare transform meets data at all: a
 reader materializes it into a buffer.
 
@@ -517,7 +518,7 @@ the second row on both of its transforms:
 There are four kinds of table, matching the four map kinds and the one
 arrangement that does not factor. A `StridedSet` holds a `ConstantMap` or
 `DimensionMap` axis; an `IndexedSet` holds an orthogonal `ArrayMap` axis
-(`.oindex`) with its coordinates grouped by chunk; a `RunSet` holds a `RangeMap`
+(`.oindex`) with its coordinates grouped by chunk; a `RangeSet` holds a `RangeMap`
 axis as runs split at chunk boundaries; and each `JointSet` holds one connected group of index arrays. Arrays
 sharing request axes are sorted together; independent groups are separate
 tables in `joint_sets`. Singleton broadcast axes retain this independence. The

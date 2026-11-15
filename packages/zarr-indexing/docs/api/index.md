@@ -25,8 +25,8 @@ and the wire format built on top of it.
 - [`zarr_indexing.domain`](domain.md) — `IndexDomain`, a rectangular region of
   integer coordinates with an explicit (possibly non-zero) origin
 - [`zarr_indexing.output_map`](output_map.md) — `ConstantMap`, `DimensionMap`,
-  and `ArrayMap`: three coordinate mappings that preserve order and duplicates,
-  one per storage dimension
+  `ArrayMap` and `RangeMap`: coordinate mappings that preserve order and
+  duplicates, one per storage dimension
 - [`zarr_indexing.transform`](transform.md) — `IndexTransform`, which pairs a
   domain with output maps, plus the indexing (`[...]`, `.oindex`, `.vindex`),
   `intersect`, `translate`, and `compose` operations, and `selection_to_transform`
@@ -37,7 +37,7 @@ and the wire format built on top of it.
   `plan_chunks`, which lazily projects a request through a caller-selected grid,
   the reusable `ChunkPlan` and paired-transform `ChunkProjection` values, and
   the plan's factored form: `GridPartition` (from `ChunkPlan.partition`),
-  holding one `StridedSet` or `IndexedSet` table per axis and `joint_sets`
+  holding one `StridedSet`, `IndexedSet` or `RangeSet` table per axis and `joint_sets`
   for connected index-array components
 - [`zarr_indexing.grid`](grid.md) — `DimensionGridLike`, the Protocol
   describing the narrow chunk-grid surface chunk resolution consumes, so that

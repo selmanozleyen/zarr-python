@@ -21,7 +21,7 @@ substituting the outer map into the inner one:
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 
@@ -33,9 +33,9 @@ from zarr_indexing.output_map import (
     DimensionMap,
     OutputIndexMap,
     RangeMap,
+    _expand_runs,  # pyright: ignore[reportPrivateUsage]
+    _range_map_or_dimension,  # pyright: ignore[reportPrivateUsage]
     array_map_or_constant,
-    expand_runs,
-    range_map_or_dimension,
 )
 from zarr_indexing.transform import IndexTransform
 
@@ -76,25 +76,11 @@ def compose(outer: IndexTransform, inner: IndexTransform) -> IndexTransform:
 
     _validate_outer_outputs(outer, inner)
 
-    # Outer runs survive a unit-stride inner map; inner runs are evaluated in `_compose_runs`.
-    expanded = outer.expand_ranges() if any(_reads_runs(outer, m) for m in inner.output) else outer
     result_output = [
-        _compose_single(expanded if _reads_runs(outer, m) else outer, m, inner.domain.inclusive_min)
-        for m in inner.output
+        _compose_single(outer, inner_map, inner.domain.inclusive_min) for inner_map in inner.output
     ]
 
     return IndexTransform(domain=outer.domain, output=tuple(result_output))
-
-
-def _reads_runs(outer: IndexTransform, inner_map: OutputIndexMap) -> bool:
-    """Whether `inner_map` evaluates an outer `RangeMap` in a way that cannot keep it compact."""
-    if isinstance(inner_map, ArrayMap):
-        return any(isinstance(m, RangeMap) for m in outer.output)
-    return (
-        isinstance(inner_map, DimensionMap)
-        and inner_map.stride != 1
-        and isinstance(outer.output[inner_map.input_dimension], RangeMap)
-    )
 
 
 def _validate_outer_outputs(outer: IndexTransform, inner: IndexTransform) -> None:
@@ -185,9 +171,12 @@ def _compose_dimension(outer: IndexTransform, inner_map: DimensionMap) -> Output
         )
 
     if isinstance(outer_map, RangeMap):
+        if stride_i != 1:
+            coordinates = _run_positions(outer, outer_map, 0)
+            return array_map_or_constant(coordinates, offset=offset_i, stride=stride_i)
         starts = checked_affine(offset_i, 1, outer_map.starts)
         origin = outer.domain.inclusive_min[outer_map.input_dimension]
-        return range_map_or_dimension(
+        return _range_map_or_dimension(
             RangeMap(outer_map.input_dimension, starts, outer_map.lengths), origin
         )
 
@@ -201,7 +190,10 @@ def _compose_dimension(outer: IndexTransform, inner_map: DimensionMap) -> Output
 
 
 def _compose_runs(outer: IndexTransform, inner_map: RangeMap, inner_origin: int) -> OutputIndexMap:
-    """Evaluate inner runs where the outer map reads them; a unit-stride window stays runs."""
+    """Evaluate inner runs where the outer map reads them; contiguous reads stay runs."""
+    if any(extent == 0 for extent in outer.domain.shape):
+        empty_shape = tuple(0 if extent == 0 else 1 for extent in outer.domain.shape)
+        return ArrayMap(index_array=np.empty(empty_shape, dtype=np.intp))
     outer_map = outer.output[inner_map.input_dimension]
     if isinstance(outer_map, ConstantMap):
         return ConstantMap(offset=int(inner_map.at(np.asarray(outer_map.offset - inner_origin))))
@@ -209,15 +201,25 @@ def _compose_runs(outer: IndexTransform, inner_map: RangeMap, inner_origin: int)
         k = outer_map.input_dimension
         lo, hi = outer.domain.inclusive_min[k], outer.domain.exclusive_max[k]
         begin = outer_map.offset + lo - inner_origin
-        return range_map_or_dimension(inner_map.window(begin, begin + hi - lo, k), lo)
+        return _range_map_or_dimension(inner_map.window(begin, begin + hi - lo, k), lo)
     if isinstance(outer_map, RangeMap):
         k = outer_map.input_dimension
-        shape = (1,) * k + (outer_map.size,) + (1,) * (outer.input_rank - k - 1)
-        starts = checked_affine(-inner_origin, 1, outer_map.starts)
-        positions = expand_runs(starts, outer_map.lengths).reshape(shape)
-    else:
-        positions = np.asarray(_positions_for_axis(outer, outer_map, inner_origin))
+        begins = checked_affine(-inner_origin, 1, outer_map.starts)
+        windows = inner_map.window(begins, begins + outer_map.lengths, k)
+        return _range_map_or_dimension(windows, outer.domain.inclusive_min[k])
+    positions = np.asarray(_positions_for_axis(outer, outer_map, inner_origin))
     return array_map_or_constant(inner_map.at(positions))
+
+
+def _run_positions(
+    outer: IndexTransform, outer_map: RangeMap, shift: int
+) -> np.ndarray[Any, np.dtype[np.intp]]:
+    """The coordinates of outer runs plus `shift`, at the outer transform's full input rank."""
+    k = outer_map.input_dimension
+    shape = (1,) * k + (outer_map.size,) + (1,) * (outer.input_rank - k - 1)
+    return _expand_runs(checked_affine(shift, 1, outer_map.starts), outer_map.lengths).reshape(
+        shape
+    )
 
 
 def _dimension_positions(
@@ -253,7 +255,9 @@ def _positions_for_axis(
         return outer_map.offset - inner_origin
     if isinstance(outer_map, DimensionMap):
         return _dimension_positions(outer, outer_map, inner_origin)
-    return _array_positions(cast("ArrayMap", outer_map), inner_origin)
+    if isinstance(outer_map, RangeMap):
+        return _run_positions(outer, outer_map, -inner_origin)
+    return _array_positions(outer_map, inner_origin)
 
 
 def _compose_array(

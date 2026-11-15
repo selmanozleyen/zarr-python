@@ -59,6 +59,8 @@ class ReadContext:
     """
 
     def __post_init__(self) -> None:
+        # Readers lower index arrays through NumPy, so runs arrive expanded, as the origin re-based.
+        object.__setattr__(self, "transform", self.transform.expand_ranges())
         origin = self.transform.domain.inclusive_min
         if any(origin):
             object.__setattr__(
