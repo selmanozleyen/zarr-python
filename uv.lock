@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.15'",
@@ -3821,6 +3821,9 @@ cli = [
 gpu = [
     { name = "cupy-cuda12x", marker = "sys_platform != 'darwin'" },
 ]
+lazy = [
+    { name = "zarr-indexing" },
+]
 optional = [
     { name = "universal-pathlib" },
 ]
@@ -3930,8 +3933,9 @@ requires-dist = [
     { name = "typer", marker = "extra == 'cli'" },
     { name = "typing-extensions", specifier = ">=4.14" },
     { name = "universal-pathlib", marker = "extra == 'optional'" },
+    { name = "zarr-indexing", marker = "extra == 'lazy'", specifier = ">=0.3.0" },
 ]
-provides-extras = ["cast-value-rs", "cli", "gpu", "optional", "remote"]
+provides-extras = ["cast-value-rs", "cli", "gpu", "lazy", "optional", "remote"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -4015,4 +4019,16 @@ test = [
     { name = "pytest-reportlog", specifier = "==1.0.0" },
     { name = "pytest-xdist", specifier = "==3.8.0" },
     { name = "uv", specifier = "==0.13.7" },
+]
+
+[[package]]
+name = "zarr-indexing"
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c1/bb/0fd5f112b25b3672464129101874460c6f2f3f775fed22cf5058de6a6630/zarr_indexing-0.3.0.tar.gz", hash = "sha256:c0991b5b5666442a29defcf6796b0f4cba9c5154634a9831313191f7d5ab6d1b", size = 314745, upload-time = "2026-09-29T14:45:58.88Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5b/33/7e136f398c56c7ac5e8c418f7dbe4c3647c12e75bdc35fe9eb0a06d2d1f3/zarr_indexing-0.3.0-py3-none-any.whl", hash = "sha256:ee64a4fc8783c1f04074f640b42f0d5c91ccedb13929ac1395dbaf547d25bbf7", size = 121092, upload-time = "2026-09-29T14:45:56.987Z" },
 ]

@@ -95,6 +95,9 @@ config = Config(
     defaults=[
         {
             "default_zarr_format": 3,
+            # Experimental: `Array.lazy`, backed by zarr-indexing.
+            # Also settable as ZARR_EXPERIMENTAL_LAZY_INDEXING=True.
+            "experimental_lazy_indexing": False,
             "array": {
                 "order": "C",
                 "write_empty_chunks": False,

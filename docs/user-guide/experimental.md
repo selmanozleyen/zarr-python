@@ -91,6 +91,44 @@ zarr.config.set({"codec_pipeline.max_workers": None})
 On many-core nodes a pool sized to `cpu_count` can oversubscribe workloads that already parallelize at a higher level (e.g. Dask).
 `codec_pipeline.max_workers` only affects `FusedCodecPipeline`; the default `BatchedCodecPipeline` ignores it.
 
+## Lazy indexing with `Array.lazy`
+
+`Array.lazy` (and `AsyncArray.lazy`) returns a lazy view of the array. Indexing the view
+does no IO: it composes the selection, and further selections compose onto it. Data is
+read only when you call `.result()` or convert the view with `numpy.asarray`. Eager
+indexing with `arr[...]` is unchanged.
+
+Lazy indexing is provided by the [`zarr-indexing`](https://zarr.readthedocs.io/projects/zarr-indexing/)
+package and is off by default. Install the extra and turn on the flag:
+
+```bash
+pip install "zarr[lazy]"
+export ZARR_EXPERIMENTAL_LAZY_INDEXING=True
+```
+
+or set it in code with `zarr.config.set({"experimental_lazy_indexing": True})`.
+
+```python
+import numpy as np
+import zarr
+
+zarr.config.set({"experimental_lazy_indexing": True})
+arr = zarr.create_array({}, shape=(100, 100), chunks=(10, 10), dtype="int32")
+arr[:] = np.arange(10_000).reshape(100, 100)
+
+view = arr.lazy[10:20, ::2]        # no IO
+view = view[3:5].oindex[:, [0, 4]]  # still no IO
+view.shape                          # (2, 2)
+view.result()                       # reads now; equals arr[13:15, ::2][:, [0, 4]]
+```
+
+The view is a [`zarr_indexing.LazyArray`](https://zarr.readthedocs.io/projects/zarr-indexing/);
+see its documentation for the supported selections. Unlike eager zarr indexing, lazy
+views accept negative slice steps. A read is split along the array's read grid, so a
+sharded array is read one inner chunk at a time. `result()` is synchronous, including on
+a view taken from an `AsyncArray`; inside a coroutine use
+`await asyncio.to_thread(view.result)`.
+
 ## `CacheStore`
 
 Zarr Python 3.1.4 adds [`zarr.experimental.cache_store.CacheStore`][], which provides a dual-store caching implementation

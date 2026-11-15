@@ -165,6 +165,7 @@ if TYPE_CHECKING:
     from typing import Self
 
     import numpy.typing as npt
+    from zarr_indexing import LazyArray
 
     from zarr.abc.codec import CodecPipeline
     from zarr.abc.store import Store
@@ -1743,6 +1744,15 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         [set_coordinate_selection][zarr.Array.set_coordinate_selection], [get_mask_selection][zarr.Array.get_mask_selection] and
         [set_mask_selection][zarr.Array.set_mask_selection] for documentation and examples."""
         return AsyncVIndex(self)
+
+    @property
+    def lazy(self) -> LazyArray:
+        """Experimental lazy indexing, see [Array.lazy][zarr.Array.lazy].
+
+        Selection is lazy, but `result()` reads synchronously. Inside a coroutine,
+        `await asyncio.to_thread(view.result)` keeps the event loop free.
+        """
+        return _lazy(Array(self))
 
     async def resize(self, new_shape: ShapeLike, delete_outside_chunks: bool = True) -> None:
         """
@@ -3937,6 +3947,22 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
         examples."""
         return BlockIndex(self)
 
+    @property
+    def lazy(self) -> LazyArray:
+        """Experimental lazy indexing.
+
+        `arr.lazy[selection]` returns a `zarr_indexing.LazyArray`: a view that
+        composes further `[...]`, `.oindex[...]` and `.vindex[...]` selections
+        without reading, and reads only when `.result()` (or `numpy.asarray`) is
+        called. Eager indexing through `arr[...]` is unchanged.
+
+        Disabled by default. Enable it with
+        `zarr.config.set({'experimental_lazy_indexing': True})` or the environment
+        variable `ZARR_EXPERIMENTAL_LAZY_INDEXING=True`, and install the
+        `zarr-indexing` package (`pip install 'zarr[lazy]'`).
+        """
+        return _lazy(self)
+
     def resize(self, new_shape: ShapeLike) -> None:
         """
         Change the shape of the array by growing or shrinking one or more
@@ -4155,6 +4181,24 @@ type CompressorsLike = (
     | None
 )
 type SerializerLike = dict[str, JSON] | ArrayBytesCodec | Literal["auto"]
+
+
+def _lazy(array: AnyArray) -> LazyArray:
+    """Wrap `array` in a `zarr_indexing.LazyArray`, if lazy indexing is enabled."""
+    if not zarr_config.get("experimental_lazy_indexing"):
+        raise RuntimeError(
+            "Lazy indexing is experimental and disabled by default. "
+            "Enable it with: zarr.config.set({'experimental_lazy_indexing': True}) "
+            "or set the environment variable ZARR_EXPERIMENTAL_LAZY_INDEXING=True"
+        )
+    try:
+        from zarr_indexing import LazyArray
+    except ImportError as e:
+        raise ImportError(
+            "Lazy indexing requires the zarr-indexing package. "
+            "Install it with: pip install 'zarr[lazy]'"
+        ) from e
+    return LazyArray(array)
 
 
 class ShardsConfigParam(TypedDict):

@@ -51,6 +51,7 @@ def test_config_defaults_set() -> None:
         == [
             {
                 "default_zarr_format": 3,
+                "experimental_lazy_indexing": False,
                 "array": {
                     "order": "C",
                     "write_empty_chunks": False,
