@@ -104,7 +104,7 @@ and the coordinates it touches form a regular lattice. Basic indexing produces
 one, and composing basic indexing with basic indexing keeps one.
 
 **A query** is a transform with at least one `ArrayMap` — an explicit lookup
-table of coordinates. Its stored coordinate arrays cost space proportional to their stored size.
+table of coordinates — or `RangeMap`, the same table stored as runs. Its stored coordinate arrays cost space proportional to their stored size.
 Coordinates may repeat or scatter, but can also be contiguous and local.
 Current query-resolution paths inspect these arrays. Fancy indexing can produce
 a query, but singleton or constant selections can collapse to `ConstantMap`;

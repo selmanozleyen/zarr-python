@@ -30,9 +30,9 @@ Key types:
   caller-selected grid and pair each chunk-local transform with its placement in
   the request, without binding a storage backend or scheduler
 - `GridPartition` — the plan's factored, columnar form: one table per axis
-  (`StridedSet`, `IndexedSet`) plus `joint_sets` for connected index-array components,
+  (`StridedSet`, `IndexedSet`, `RangeSet`) plus `joint_sets` for connected index-array components,
   from which projections are derived on demand
-- `ConstantMap`, `DimensionMap`, `ArrayMap` — the three ways a single output
+- `ConstantMap`, `DimensionMap`, `ArrayMap`, `RangeMap` — the ways a single output
   dimension can depend on the input
 - `compose` — chain two transforms into one
 

@@ -1,8 +1,8 @@
-"""Output index maps — three ordered mappings to integer coordinates.
+"""Output index maps — four ordered mappings to integer coordinates.
 
 An output index map describes how input cells address one dimension of
 the output space. Its coordinates form an **ordered, duplicate-preserving sequence**
-aligned with the input domain, never a mathematical set. Three representations
+aligned with the input domain, never a mathematical set. Four representations
 cover the cases that arise in practice:
 
 - `ConstantMap(offset=5)` — every request cell maps to coordinate `5`
@@ -10,6 +10,8 @@ cover the cases that arise in practice:
   — the ordered arithmetic progression `[3, 5, 7, 9, 11]`
 - `ArrayMap(index_array=[5, 1, 1])` — the explicit sequence `[5, 1, 1]`,
   preserving both order and the repeated coordinate
+- `RangeMap(input_dimension=0, starts=[5, 0], lengths=[3, 2])` — the runs
+  `[5, 6, 7, 0, 1]`, the same sequence an `ArrayMap` would list, stored per run
 
 Every output map participates in two operations defined on `IndexTransform`,
 which provides the input-domain context these maps lack:
@@ -24,11 +26,13 @@ These two operations are the foundation of chunk resolution: for each chunk,
 intersect the map with the chunk's range, then translate to chunk-local
 coordinates.
 
-The three types exist because they trade off generality for efficiency:
+The types exist because they trade off generality for efficiency:
 
 - `ConstantMap`: O(1) storage, O(1) intersection
 - `DimensionMap`: O(1) storage, O(1) intersection (analytical)
 - `ArrayMap`: O(n) storage, O(n) intersection (must scan the array)
+- `RangeMap`: O(runs) storage, O(runs + pieces) chunk planning; TensorStore has
+  no counterpart, so it serializes as the `ArrayMap` it equals
 
 Collapsing everything to `ArrayMap` would be correct but wasteful — a
 billion-element slice would materialize a billion coordinates just to group
@@ -37,7 +41,7 @@ them by chunk, when `DimensionMap` does it with three integers.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -62,6 +66,9 @@ def _array_map_dependency_axes(index_array: np.ndarray[Any, Any]) -> tuple[int, 
     itself is not reported.
     """
     return tuple(axis for axis, size in enumerate(index_array.shape) if size > 1)
+
+
+_INTP_MAX = int(np.iinfo(np.intp).max)
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,4 +415,149 @@ def array_map_or_constant(
     return ArrayMap(index_array=arr, offset=offset, stride=stride)
 
 
-OutputIndexMap = ConstantMap | DimensionMap | ArrayMap
+def _expand_runs(
+    starts: npt.NDArray[np.intp], lengths: npt.NDArray[np.intp]
+) -> npt.NDArray[np.intp]:
+    """The coordinates of consecutive runs, concatenated in order.
+
+    >>> _expand_runs(np.array([5, 0]), np.array([3, 2])).tolist()
+    [5, 6, 7, 0, 1]
+    """
+    total = int(lengths.sum())
+    run_offset = np.repeat(starts - (np.cumsum(lengths) - lengths), lengths)
+    return np.asarray(run_offset + np.arange(total, dtype=np.intp), dtype=np.intp)
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class RangeMap:
+    """Concatenated runs of consecutive output coordinates along one input axis.
+
+    Run `r` reads `starts[r]` through `starts[r] + lengths[r] - 1`, and the runs
+    are laid end to end along `input_dimension`, counted from the domain's lower
+    bound as an `ArrayMap` is. It is that `ArrayMap` in O(runs) space, keeping
+    order, repeats and overlaps. No selector produces one; build it and compose
+    it onto a view as an `IndexTransform` key.
+
+    Indexing and composition keep it compact where they can: a step-1 slice of
+    the runs' axis is a window of the runs (one run left is a `DimensionMap`),
+    other axes leave it untouched, and integers, strided slices and index
+    arrays look up only the positions they select. Translation, point
+    evaluation and chunk planning keep it too; `intersect`, `inverted` and the
+    writer expand it to its `ArrayMap`. TensorStore and ndsel have no such map, so `to_json` writes the
+    expanded `index_array`, and a transform compares unequal to its expanded form.
+
+    Examples
+    --------
+    >>> m = RangeMap(input_dimension=0, starts=np.array([5, 0]), lengths=np.array([3, 2]))
+    >>> m.at(np.arange(m.size)).tolist()
+    [5, 6, 7, 0, 1]
+    """
+
+    input_dimension: int
+    """The input axis the runs are laid along."""
+
+    starts: npt.NDArray[np.intp]
+    """First output coordinate of each run."""
+
+    lengths: npt.NDArray[np.intp]
+    """Number of coordinates in each run; zero-length runs are allowed."""
+
+    size: int = field(init=False, repr=False)
+    """Total number of coordinates: the extent the domain has along `input_dimension`."""
+
+    def __post_init__(self) -> None:
+        starts = np.asarray(self.starts)
+        lengths = np.asarray(self.lengths)
+        if starts.ndim != 1 or starts.shape != lengths.shape:
+            raise ValueError(
+                f"starts and lengths must be 1-D and equally long, got {starts.shape} "
+                f"and {lengths.shape}"
+            )
+        for name, array in (("starts", starts), ("lengths", lengths)):
+            if array.size == 0:
+                array = np.empty(0, dtype=np.intp)
+            elif not np.issubdtype(array.dtype, np.integer):
+                raise TypeError(f"{name} must have an integer dtype, got {array.dtype}")
+            # As `ArrayMap`: overflow raises, and immutable bytes own the snapshot.
+            frozen = np.frombuffer(checked_affine(0, 1, array).tobytes(), dtype=np.intp)
+            object.__setattr__(self, name, frozen)
+        if (self.lengths < 0).any():
+            raise ValueError("lengths must be non-negative")
+        nonempty = self.lengths > 0
+        if (self.starts[nonempty] > _INTP_MAX - (self.lengths[nonempty] - 1)).any():
+            raise OverflowError("a run ends past the largest representable coordinate")
+        size = int(self.lengths.sum(dtype=object)) if self.lengths.size else 0
+        if size > _INTP_MAX:
+            raise OverflowError(f"the runs hold {size} cells, more than an axis can index")
+        object.__setattr__(self, "size", size)
+
+    def __reduce__(self) -> tuple[object, tuple[object, ...]]:
+        """Reconstruct through `__init__`, so a pickled copy owns read-only arrays."""
+        return (type(self), (self.input_dimension, self.starts, self.lengths))
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, RangeMap):
+            return NotImplemented
+        return (
+            self.input_dimension == other.input_dimension
+            and bool(np.array_equal(self.starts, other.starts))
+            and bool(np.array_equal(self.lengths, other.lengths))
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.input_dimension, self.starts.tobytes(), self.lengths.tobytes()))
+
+    def at(self, positions: npt.NDArray[np.integer[Any]]) -> npt.NDArray[np.intp]:
+        """The coordinates at zero-based `positions` along `input_dimension`, without expanding."""
+        ends = np.cumsum(self.lengths)
+        run = np.searchsorted(ends, positions, side="right")
+        return np.asarray(
+            self.starts[run] + positions - (ends[run] - self.lengths[run]), dtype=np.intp
+        )
+
+    def window(self, begins: npt.ArrayLike, ends: npt.ArrayLike, input_dimension: int) -> RangeMap:
+        """The runs covering positions `[begins[i], ends[i])`, concatenated in order.
+
+        O(windows + runs returned); a scalar pair is one window.
+
+        >>> m = RangeMap(0, np.array([5, 0]), np.array([3, 2]))
+        >>> w = m.window([1, 0], [4, 1], input_dimension=0)
+        >>> w.starts.tolist(), w.lengths.tolist()
+        ([6, 0, 5], [2, 1, 1])
+        """
+        lo_window = np.atleast_1d(np.asarray(begins, dtype=np.intp))
+        hi_window = np.atleast_1d(np.asarray(ends, dtype=np.intp))
+        run_end = np.cumsum(self.lengths)
+        run_begin = run_end - self.lengths
+        first = np.searchsorted(run_end, lo_window, side="right")
+        count = np.maximum(np.searchsorted(run_begin, hi_window, side="left") - first, 0)
+        window = np.repeat(np.arange(lo_window.size, dtype=np.intp), count)
+        step = np.arange(window.size, dtype=np.intp) - np.repeat(np.cumsum(count) - count, count)
+        run = np.repeat(first, count) + step
+        lo = np.maximum(run_begin[run], lo_window[window])
+        hi = np.minimum(run_end[run], hi_window[window])
+        keep = hi > lo
+        starts = self.starts[run] + (lo - run_begin[run])
+        return RangeMap(input_dimension, starts[keep], (hi - lo)[keep])
+
+    def to_json(self) -> OutputIndexMapJSON:
+        """Refuse: ndsel has no run map, and the index array needs the transform's rank."""
+        raise TypeError(
+            "a RangeMap has no ndsel form of its own; IndexTransform.to_json writes the "
+            "ArrayMap it equals"
+        )
+
+    def bounds(self) -> tuple[int, int]:
+        """Smallest and largest coordinate, inclusive; requires a nonzero `size`."""
+        nonempty = self.lengths > 0
+        starts = self.starts[nonempty]
+        return int(starts.min()), int((starts + self.lengths[nonempty] - 1).max())
+
+    def to_array_map(self, rank: int) -> ArrayMap | ConstantMap:
+        """The equivalent map at a transform's full input `rank`."""
+        k = self.input_dimension
+        shape = (1,) * k + (self.size,) + (1,) * (rank - k - 1)
+        return array_map_or_constant(_expand_runs(self.starts, self.lengths).reshape(shape))
+
+
+OutputIndexMap = ConstantMap | DimensionMap | ArrayMap | RangeMap

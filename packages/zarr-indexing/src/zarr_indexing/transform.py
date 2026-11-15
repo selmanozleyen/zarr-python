@@ -45,6 +45,7 @@ from zarr_indexing.output_map import (
     ConstantMap,
     DimensionMap,
     OutputIndexMap,
+    RangeMap,
     array_map_or_constant,
 )
 
@@ -123,6 +124,18 @@ class IndexTransform:
                     raise ValueError(
                         f"output[{i}].input_dimension = {m.input_dimension} "
                         f"is out of range for input rank {self.domain.ndim}"
+                    )
+            elif isinstance(m, RangeMap):
+                k = m.input_dimension
+                if k < 0 or k >= self.domain.ndim:
+                    raise ValueError(
+                        f"output[{i}].input_dimension = {k} "
+                        f"is out of range for input rank {self.domain.ndim}"
+                    )
+                if m.size != self.domain.shape[k]:
+                    raise ValueError(
+                        f"output[{i}] runs cover {m.size} cells but input dimension {k} "
+                        f"has extent {self.domain.shape[k]}"
                     )
             elif isinstance(m, ArrayMap):
                 # An index array carries the transform's full input rank: the axis
@@ -353,6 +366,10 @@ class IndexTransform:
                     output_map.stride,
                     points[..., output_map.input_dimension],
                 )
+            elif isinstance(output_map, RangeMap):
+                k = output_map.input_dimension
+                positions = _positions_from_origin(points[..., k], self.domain.inclusive_min[k])
+                result[..., output_dimension] = output_map.at(positions)
             else:
                 index = tuple(
                     np.zeros(batch_shape, dtype=np.intp)
@@ -388,6 +405,8 @@ class IndexTransform:
             when input labels cannot be transferred to unlabeled output
             dimensions.
         """
+        if (expanded := self.expand_ranges()) is not self:
+            return expanded.inverted()
         if self.domain.labels is not None:
             raise ValueError(
                 "cannot invert transform: input labels cannot be represented "
@@ -414,6 +433,7 @@ class IndexTransform:
                 inverse_min.append(output_map.offset)
                 inverse_max.append(output_map.offset + 1)
                 continue
+            output_map = cast("DimensionMap", output_map)
             if output_map.stride not in (-1, 1):
                 raise ValueError(
                     "cannot invert transform: DimensionMap stride must be +1 or -1, "
@@ -484,8 +504,9 @@ class IndexTransform:
                     parts.append(f"[{start}, {stop})")
                 else:
                     parts.append(f"[{start}, {stop}) step {m.stride}")
+            elif isinstance(m, RangeMap):
+                parts.append("{" + f"runs({m.starts.size})" + "}")
             else:
-                # m: ArrayMap (OutputIndexMap = ConstantMap | DimensionMap | ArrayMap)
                 storage = m.offset + m.stride * m.index_array
                 n = int(storage.size)  # .size, not len(): index_array may be 0-d
                 if n <= 5:
@@ -502,8 +523,9 @@ class IndexTransform:
                 maps.append(f"out[{i}] = {m.offset}")
             elif isinstance(m, DimensionMap):
                 maps.append(f"out[{i}] = {m.offset} + {m.stride} * in[{m.input_dimension}]")
+            elif isinstance(m, RangeMap):
+                maps.append(f"out[{i}] = runs({m.starts.size})[in[{m.input_dimension}]]")
             else:
-                # m: ArrayMap (OutputIndexMap = ConstantMap | DimensionMap | ArrayMap)
                 maps.append(f"out[{i}] = {m.offset} + {m.stride} * arr{m.index_array.shape}[in]")
         maps_str = ", ".join(maps)
         return f"IndexTransform(domain={self.domain}, {maps_str})"
@@ -541,7 +563,7 @@ class IndexTransform:
             also referenced by a DimensionMap. These dependencies cannot be
             filtered independently by the current intersection implementation.
         """
-        return _intersect(self, output_domain)
+        return _intersect(self.expand_ranges(), output_domain)
 
     def translate(self, shift: tuple[int, ...]) -> IndexTransform:
         """Shift the source coordinates every cell reads by `shift`, per dimension.
@@ -565,8 +587,11 @@ class IndexTransform:
                         stride=m.stride,
                     )
                 )
+            elif isinstance(m, RangeMap):
+                new_output.append(
+                    RangeMap(m.input_dimension, checked_affine(s, 1, m.starts), m.lengths)
+                )
             else:
-                # m: ArrayMap (OutputIndexMap = ConstantMap | DimensionMap | ArrayMap)
                 new_output.append(
                     m._with_affine(m.offset + s, m.stride)  # pyright: ignore[reportPrivateUsage]
                 )
@@ -648,10 +673,10 @@ class IndexTransform:
 
         Returns
         -------
-        `"none"` when no output map is an `ArrayMap`; `"orthogonal"` when every
-        `ArrayMap` has exactly one non-singleton input axis, distinct from all
-        other ArrayMaps' axes and all DimensionMap input dimensions (one
-        independent gather per axis); `"general"` otherwise —
+        `"none"` when no output map is an `ArrayMap` or `RangeMap`; `"orthogonal"`
+        when every `ArrayMap` has exactly one non-singleton input axis and every
+        `RangeMap` its input dimension, each distinct from the others and from all
+        DimensionMap input dimensions (one independent gather per axis); `"general"` otherwise —
         correlated (`vindex`) maps sharing their non-singleton axes, maps produced
         by composing fancy steps, maps sharing an input axis (a diagonal gather),
         and maps whose shape names no dependency axis. A map can have a
@@ -680,6 +705,12 @@ class IndexTransform:
         seen = {m.input_dimension for m in self.output if isinstance(m, DimensionMap)}
         has_array = False
         for m in self.output:
+            if isinstance(m, RangeMap):
+                has_array = True
+                if m.input_dimension in seen:
+                    return "general"
+                seen.add(m.input_dimension)
+                continue
             if not isinstance(m, ArrayMap):
                 continue
             has_array = True
@@ -723,6 +754,14 @@ class IndexTransform:
             return self.vindex[selection]
         else:
             raise ValueError(f"Unknown mode: {mode!r}")
+
+    def expand_ranges(self) -> IndexTransform:
+        """This transform with every `RangeMap` replaced by its `ArrayMap`; itself when it has none."""
+        if not any(isinstance(m, RangeMap) for m in self.output):
+            return self
+        rank = self.input_rank
+        output = tuple(m.to_array_map(rank) if isinstance(m, RangeMap) else m for m in self.output)
+        return IndexTransform(domain=self.domain, output=output)
 
     def compose(self, inner: IndexTransform) -> IndexTransform:
         """Chain `inner` onto this transform, yielding one direct transform.
@@ -781,7 +820,10 @@ class IndexTransform:
             "input_inclusive_min": list(self.domain.inclusive_min),
             "input_exclusive_max": list(self.domain.exclusive_max),
             "input_labels": emit_labels(self.domain.labels, self.domain.ndim),
-            "output": [m.to_json() for m in self.output],
+            "output": [
+                cast("ConstantMap | DimensionMap | ArrayMap", m).to_json()
+                for m in self.expand_ranges().output
+            ],
         }
 
     @classmethod
@@ -1004,7 +1046,7 @@ def _intersect_orthogonal(
             new_output.append(m)
 
         else:
-            # m: ArrayMap (OutputIndexMap = ConstantMap | DimensionMap | ArrayMap)
+            m = cast("ArrayMap", m)
             # Orthogonal: the array varies over a single axis. Filter along that
             # axis and keep the array at full input rank so the singleton axes
             # it broadcasts over are preserved.
@@ -1231,6 +1273,7 @@ def _intersect_general(
         elif isinstance(m, ConstantMap):
             new_output.append(m)
         else:
+            m = cast("DimensionMap", m)
             new_output.append(
                 DimensionMap(
                     input_dimension=new_input_dim_of[m.input_dimension],
@@ -1419,6 +1462,9 @@ def _compose_selection(
 
 def _apply_basic_indexing(transform: IndexTransform, selection: Any) -> IndexTransform:
     """Apply basic indexing (int, slice, ellipsis, newaxis) to an IndexTransform."""
+    if any(isinstance(m, RangeMap) for m in transform.output):
+        # Composition evaluates runs at the selected positions; a step-1 slice keeps them.
+        return IndexTransform.identity(transform.domain)[selection].compose(transform)
     normalized = _normalize_basic_selection(selection, transform.domain.ndim)
 
     new_inclusive_min: list[int] = []
@@ -1501,7 +1547,7 @@ def _apply_basic_indexing(transform: IndexTransform, selection: Any) -> IndexTra
             else:
                 raise RuntimeError(f"unexpected: dimension {d} not handled")
         else:
-            # m: ArrayMap (OutputIndexMap = ConstantMap | DimensionMap | ArrayMap).
+            m = cast("ArrayMap", m)
             # A result narrowed to a single coordinate collapses to the
             # ConstantMap it equals — whether an integer consumed the dependency
             # axis or a slice narrowed it to one entry — so a non-empty ArrayMap
@@ -1595,7 +1641,7 @@ def _apply_oindex(transform: IndexTransform, selection: Any) -> IndexTransform:
     broadcasts along.
     """
     validate_advanced_selection(selection, transform.domain, "orthogonal")
-    if any(isinstance(m, ArrayMap) for m in transform.output):
+    if any(isinstance(m, (ArrayMap, RangeMap)) for m in transform.output):
         return _compose_selection(transform, selection, "orthogonal")
     normalized = _normalize_oindex_selection(selection, transform.domain.ndim)
 
@@ -1733,7 +1779,7 @@ def _apply_vindex(transform: IndexTransform, selection: Any) -> IndexTransform:
     `_apply_oindex`.
     """
     validate_advanced_selection(selection, transform.domain, "vectorized")
-    if any(isinstance(m, ArrayMap) for m in transform.output):
+    if any(isinstance(m, (ArrayMap, RangeMap)) for m in transform.output):
         return _compose_selection(transform, selection, "vectorized")
     if not isinstance(selection, tuple):
         selection = (selection,)

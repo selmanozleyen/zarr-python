@@ -170,7 +170,7 @@ from zarr_indexing.chunk_resolution import (
 from zarr_indexing.domain import IndexDomain
 from zarr_indexing.errors import BoundsCheckError
 from zarr_indexing.grid import DimensionGrid, FixedDimension, dimension_grids_from_chunks
-from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap
+from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap, RangeMap
 from zarr_indexing.reader import (
     ReadContext,
     Reader,
@@ -346,7 +346,7 @@ def _partition_out_selection(
     # differently from the synthetic domain; broadcast coordinate selectors
     # retain that domain's axis order for scatter.
     dependencies = [
-        m.input_dimension if isinstance(m, DimensionMap) else m.dependent_axis
+        m.input_dimension if isinstance(m, DimensionMap) else cast("ArrayMap", m).dependent_axis
         for m in cell_transform.output
         if not isinstance(m, ConstantMap)
     ]
@@ -372,7 +372,8 @@ def _partition_out_selection(
                 )
                 coordinates = output_map.offset + output_map.stride * axis.reshape(shape)
             else:
-                coordinates = output_map.offset + output_map.stride * output_map.index_array
+                array_map = cast("ArrayMap", output_map)
+                coordinates = array_map.offset + array_map.stride * array_map.index_array
             correlated_selectors.append(np.asarray(coordinates, dtype=np.intp))
         return tuple(correlated_selectors)
 
@@ -393,8 +394,9 @@ def _partition_out_selection(
                 )
             )
         else:
+            array_map = cast("ArrayMap", output_map)
             selectors.append(
-                (output_map.offset + output_map.stride * output_map.index_array.ravel()).astype(
+                (array_map.offset + array_map.stride * array_map.index_array.ravel()).astype(
                     np.intp
                 )
             )
@@ -745,7 +747,7 @@ class LazyArray:
     def is_box(self) -> bool:
         """Whether this view selects a rectangular region rather than a point list.
 
-        True exactly when the composed transform has no `ArrayMap` output maps.
+        True exactly when the composed transform has no `ArrayMap` or `RangeMap` output maps.
         Basic indexing of a box stays a box. Advanced indexing can introduce
         index arrays, but singleton gathers and later selections may remove them.
 
@@ -760,7 +762,7 @@ class LazyArray:
         >>> (array[1:, ::2].is_box, array.oindex[[2, 0], :].is_box)
         (True, False)
         """
-        return not any(isinstance(m, ArrayMap) for m in self._transform.output)
+        return not any(isinstance(m, (ArrayMap, RangeMap)) for m in self._transform.output)
 
     def bounding_box(self) -> tuple[tuple[int, int], ...] | None:
         """The storage region this view touches, one interval per storage dimension.
@@ -812,6 +814,9 @@ class LazyArray:
                 first = m.offset + m.stride * domain.inclusive_min[d]
                 last = m.offset + m.stride * (domain.exclusive_max[d] - 1)
                 bounds.append((min(first, last), max(first, last) + 1))
+            elif isinstance(m, RangeMap):
+                lo, hi = m.bounds()
+                bounds.append((lo, hi + 1))
             else:
                 coords = m.offset + m.stride * m.index_array
                 bounds.append((int(coords.min()), int(coords.max()) + 1))
@@ -860,7 +865,8 @@ class LazyArray:
         if not self.is_box:
             return None
         return tuple(
-            1 if isinstance(m, ConstantMap) else abs(m.stride) for m in self._transform.output
+            1 if isinstance(m, ConstantMap) else abs(cast("DimensionMap", m).stride)
+            for m in self._transform.output
         )
 
     # -- partitioning -------------------------------------------------------
@@ -1273,7 +1279,8 @@ class LazyArray:
         its JSON is not embedded in the returned token, but is allocated while
         computing the digest. Equal serialized transforms and equal source
         tokens produce equal tokens; arbitrary semantically equivalent mappings
-        are not guaranteed to serialize identically.
+        are not guaranteed to serialize identically. A `RangeMap` contributes its
+        runs rather than its expanded coordinates.
 
         Dask tokenizes the wrapped source using its normal dispatch and
         determinism policy. This may read or hash source values. Dask is
@@ -1283,7 +1290,20 @@ class LazyArray:
         """
         from dask.base import tokenize  # pyright: ignore[reportMissingImports]
 
-        canonical = json.dumps(self._transform.to_json(), sort_keys=True)
+        transform = self._transform
+        if any(isinstance(m, RangeMap) for m in transform.output):
+            body: Any = {
+                "domain": transform.domain.to_json(),
+                "output": [
+                    [m.input_dimension, m.starts.tolist(), m.lengths.tolist()]
+                    if isinstance(m, RangeMap)
+                    else m.to_json()
+                    for m in transform.output
+                ],
+            }
+        else:
+            body = transform.to_json()
+        canonical = json.dumps(body, sort_keys=True)
         return (
             type(self).__qualname__,
             tokenize(self._array),

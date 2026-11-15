@@ -23,6 +23,8 @@ so each axis is resolved once against its grid into a table:
   the first cell, and whether the row covers its chunk exactly once.
 - `IndexedSet` — an orthogonal `ArrayMap` axis: its coordinates grouped by
   chunk in CSR form, with the request positions they fill.
+- `RangeSet` — a `RangeMap` axis: its runs split at chunk boundaries into
+  pieces, grouped by chunk in CSR form, in O(runs + pieces) without expanding.
 - `JointSet` — one connected index-array component. Arrays sharing input
   axes are grouped together; independent components remain separate tables.
 
@@ -47,7 +49,14 @@ import numpy as np
 
 from zarr_indexing._affine import checked_affine
 from zarr_indexing.domain import IndexDomain
-from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap, OutputIndexMap
+from zarr_indexing.output_map import (
+    ArrayMap,
+    ConstantMap,
+    DimensionMap,
+    OutputIndexMap,
+    RangeMap,
+    _expand_runs,  # pyright: ignore[reportPrivateUsage]
+)
 from zarr_indexing.transform import (
     IndexTransform,
     _intersect_dimension_map,  # pyright: ignore[reportPrivateUsage]
@@ -456,6 +465,86 @@ class IndexedSet:
 
 
 @dataclass(frozen=True, slots=True)
+class RangeSet:
+    """One output dimension read through a `RangeMap`, one row per chunk.
+
+    Each run is split at chunk boundaries into pieces, and the pieces are
+    grouped by chunk in CSR form: row ``i`` owns pieces
+    ``pointer[i]:pointer[i + 1]``, in request order. Piece ``j`` is a
+    `StridedSet` row of stride 1: ``extent[j]`` consecutive chunk-local
+    coordinates from ``local_start[j]``, filling request positions from
+    ``origin[j]``, counted from the request axis's lower bound. Pieces that
+    continue each other in storage and in the request are merged. No column has
+    an entry per cell. Columns are read-only NumPy arrays.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from zarr_indexing import IndexDomain, IndexTransform, RangeMap, plan_chunks
+    >>> from zarr_indexing.grid import dimension_grids_from_chunks
+    >>> grids = dimension_grids_from_chunks((4,), shape=(10,))
+    >>> runs = RangeMap(0, starts=np.array([6, 1]), lengths=np.array([3, 2]))
+    >>> transform = IndexTransform(IndexDomain.from_shape((5,)), (runs,))
+    >>> (axis,) = plan_chunks(transform, grids).partition().sets
+    >>> axis.chunk.tolist(), axis.pointer.tolist()
+    ([0, 1, 2], [0, 1, 2, 3])
+    >>> axis.local_start.tolist(), axis.extent.tolist(), axis.origin.tolist()
+    ([1, 2, 0], [2, 2, 1], [3, 0, 2])
+    """
+
+    output_dimension: int
+    """The storage axis this table describes."""
+
+    input_dimension: int
+    """The request axis the runs are laid along."""
+
+    chunk: np.ndarray[Any, np.dtype[np.intp]]
+    """Chunk index along the axis, one per row, ascending."""
+
+    chunk_start: np.ndarray[Any, np.dtype[np.intp]]
+    """Storage origin of each chunk."""
+
+    chunk_extent: np.ndarray[Any, np.dtype[np.intp]]
+    """Data extent of each chunk."""
+
+    pointer: np.ndarray[Any, np.dtype[np.intp]]
+    """CSR row pointer: row ``i`` owns pieces ``pointer[i]`` to ``pointer[i + 1]``."""
+
+    local_start: np.ndarray[Any, np.dtype[np.intp]]
+    """Chunk-local storage coordinate of each piece's first cell."""
+
+    extent: np.ndarray[Any, np.dtype[np.intp]]
+    """Cells in each piece."""
+
+    origin: np.ndarray[Any, np.dtype[np.intp]]
+    """Request position of each piece's first cell."""
+
+    def __post_init__(self) -> None:
+        _own_columns(
+            self,
+            "chunk",
+            "chunk_start",
+            "chunk_extent",
+            "pointer",
+            "local_start",
+            "extent",
+            "origin",
+        )
+
+    def __len__(self) -> int:
+        return int(self.chunk.size)
+
+    @property
+    def counts(self) -> np.ndarray[Any, np.dtype[np.intp]]:
+        """Pieces per row."""
+        return np.diff(self.pointer)
+
+    def run(self, row: int) -> slice:
+        """The slice of the piece columns a row owns."""
+        return slice(int(self.pointer[row]), int(self.pointer[row + 1]))
+
+
+@dataclass(frozen=True, slots=True)
 class JointSet:
     """One connected component of index arrays, grouped by the chunk each point lands in.
 
@@ -681,6 +770,50 @@ def _indexed_set(out_dim: int, m: ArrayMap, dg: DimensionGridLike) -> IndexedSet
     )
 
 
+def _range_set(out_dim: int, m: RangeMap, dg: DimensionGridLike) -> RangeSet:
+    keep = m.lengths > 0
+    starts = m.starts[keep]
+    stops = starts + m.lengths[keep]
+    position = (np.cumsum(m.lengths) - m.lengths)[keep]
+    dg.index_to_chunk(int(starts.min()))
+    dg.index_to_chunk(int((stops - 1).max()))
+    first = dg.indices_to_chunks(starts)
+    count = dg.indices_to_chunks(stops - 1) - first + 1
+    run = np.repeat(np.arange(starts.size, dtype=np.intp), count)
+    step = np.arange(run.size, dtype=np.intp) - np.repeat(np.cumsum(count) - count, count)
+    chunk = np.repeat(first, count) + step
+    unique, inverse = np.unique(chunk, return_inverse=True)
+    unique_start, unique_extent = _chunk_bounds(dg, np.asarray(unique, dtype=np.intp))
+    c_start = unique_start[inverse]
+    lo = np.maximum(starts[run], c_start)
+    hi = np.minimum(stops[run], c_start + unique_extent[inverse])
+    order = np.argsort(inverse, kind="stable")
+    row = inverse[order]
+    local = (lo - c_start)[order]
+    length = (hi - lo)[order]
+    piece_position = (position[run] + lo - starts[run])[order]
+    # Pieces that continue each other in storage and in the request merge, so
+    # consecutive rows of a batch plan like one run.
+    continues = (
+        (row[1:] == row[:-1])
+        & (local[1:] == local[:-1] + length[:-1])
+        & (piece_position[1:] == piece_position[:-1] + length[:-1])
+    )
+    head = np.flatnonzero(np.concatenate([[True], ~continues]))
+    rows, counts = np.unique(row[head], return_counts=True)
+    return RangeSet(
+        output_dimension=out_dim,
+        input_dimension=m.input_dimension,
+        chunk=np.asarray(unique[rows], dtype=np.intp),
+        chunk_start=unique_start[rows],
+        chunk_extent=unique_extent[rows],
+        pointer=np.concatenate([[0], np.cumsum(counts)]).astype(np.intp),
+        local_start=local[head],
+        extent=np.add.reduceat(length, head) if head.size else length,
+        origin=piece_position[head],
+    )
+
+
 def _chunk_keys(
     chunk_ids: Sequence[np.ndarray[Any, np.dtype[np.intp]]],
 ) -> np.ndarray[Any, np.dtype[np.intp]]:
@@ -814,12 +947,45 @@ def _indexed_piece(axis: IndexedSet, row: int, rank: int, origin: int) -> _AxisP
     )
 
 
+def _range_piece(axis: RangeSet, row: int, rank: int, origin: int) -> _AxisPiece:
+    """One row of a run table: a slice when the chunk holds one piece, else index arrays."""
+    run = axis.run(row)
+    k = axis.input_dimension
+    c_start = int(axis.chunk_start[row])
+    c_extent = int(axis.chunk_extent[row])
+    local, length, position = axis.local_start[run], axis.extent[run], axis.origin[run]
+    count = int(length.sum())
+    if local.size == 1:
+        start = int(local[0])
+        return (
+            int(axis.chunk[row]),
+            c_start,
+            c_extent,
+            k,
+            count,
+            DimensionMap(input_dimension=k, offset=start),
+            DimensionMap(input_dimension=k, offset=origin + int(position[0])),
+            start == 0 and count == c_extent,
+        )
+    shape = (1,) * k + (count,) + (1,) * (rank - k - 1)
+    return (
+        int(axis.chunk[row]),
+        c_start,
+        c_extent,
+        k,
+        count,
+        ArrayMap(index_array=_expand_runs(local, length).reshape(shape)),
+        ArrayMap(index_array=_expand_runs(position, length).reshape(shape), offset=origin),
+        False,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class GridPartition:
     """A plan in factored form: per-axis tables whose product is the chunk walk.
 
-    `sets` holds one `StridedSet` or `IndexedSet` per output dimension the
-    transform reads independently, in output-dimension order; `joint_sets`
+    `sets` holds one `StridedSet`, `IndexedSet` or `RangeSet` per output
+    dimension the transform reads independently, in output-dimension order; `joint_sets`
     holds the connected index-array components. A projection is one row of each
     table, so the partition has ``prod(row_shape)`` rows, walked
     in row-major order over `row_shape` (the component tables after `sets`). Rows are materialized into
@@ -851,7 +1017,7 @@ class GridPartition:
     dimension_grids: tuple[DimensionGridLike, ...]
     """One grid per storage dimension."""
 
-    sets: tuple[StridedSet | IndexedSet, ...]
+    sets: tuple[StridedSet | IndexedSet | RangeSet, ...]
     """Independent per-axis tables, in output-dimension order."""
 
     joint_sets: tuple[JointSet, ...]
@@ -887,13 +1053,15 @@ class GridPartition:
 
     # -- factorized assembly ------------------------------------------------
 
-    def _pieces(self, axis: StridedSet | IndexedSet, row: int) -> _AxisPiece:
+    def _pieces(self, axis: StridedSet | IndexedSet | RangeSet, row: int) -> _AxisPiece:
         domain = self.transform.domain
         if isinstance(axis, StridedSet):
             origin = (
                 0 if axis.input_dimension is None else domain.inclusive_min[axis.input_dimension]
             )
             return _strided_piece(axis, row, origin)
+        if isinstance(axis, RangeSet):
+            return _range_piece(axis, row, domain.ndim, domain.inclusive_min[axis.input_dimension])
         return _indexed_piece(axis, row, domain.ndim, domain.inclusive_min[axis.input_dimension])
 
     def _unbound(self) -> tuple[list[OutputIndexMap | None], bool]:
@@ -1117,8 +1285,8 @@ def _component_joint_sets(
 def _shared_input_axis(transform: IndexTransform) -> int | None:
     """An input axis read by two output maps in a way that does not factor, if any.
 
-    Two `DimensionMap`s on one axis, or a `DimensionMap` and an orthogonal
-    `ArrayMap` on one axis, make a diagonal: neither restricts independently
+    Two maps reading one axis independently — `DimensionMap`s, `RangeMap`s or
+    orthogonal `ArrayMap`s — make a diagonal: neither restricts independently
     of the other. Correlated `ArrayMap`s sharing axes are the `JointSet` case
     and factor fine; an `ArrayMap` varying over a `DimensionMap`'s axis is
     rejected separately by `_prepare_correlated`.
@@ -1126,7 +1294,7 @@ def _shared_input_axis(transform: IndexTransform) -> int | None:
     seen: set[int] = set()
     correlated = transform.index_array_structure == "general"
     for m in transform.output:
-        if isinstance(m, DimensionMap):
+        if isinstance(m, (DimensionMap, RangeMap)):
             axis: int | None = m.input_dimension
         elif isinstance(m, ArrayMap) and not correlated:
             axis = m.dependent_axis
@@ -1155,15 +1323,20 @@ def _partition_transform(
             transform=transform, dimension_grids=grids, sets=(), joint_sets=(), row_shape=(0,)
         )
     correlated = transform.index_array_structure == "general"
-    sets: list[StridedSet | IndexedSet] = []
-    for out_dim, m in enumerate(transform.output):
-        if isinstance(m, ArrayMap):
+    # The correlated walk renumbers residual axes and handles only strided rows,
+    # so runs beside correlated arrays expand, including runs on axes no array shares.
+    planned = transform.expand_ranges() if correlated else transform
+    sets: list[StridedSet | IndexedSet | RangeSet] = []
+    for out_dim, m in enumerate(planned.output):
+        if isinstance(m, RangeMap):
+            sets.append(_range_set(out_dim, m, grids[out_dim]))
+        elif isinstance(m, ArrayMap):
             if correlated:
                 continue
             sets.append(_indexed_set(out_dim, m, grids[out_dim]))
         else:
             sets.append(_strided_set(transform, out_dim, m, grids[out_dim]))
-    joint_sets = _component_joint_sets(transform, grids) if correlated else ()
+    joint_sets = _component_joint_sets(planned, grids) if correlated else ()
     row_shape = tuple(len(axis) for axis in sets) + tuple(len(joint) for joint in joint_sets)
     return GridPartition(
         transform=transform,
