@@ -431,9 +431,12 @@ class RangeMap:
     order, repeats and overlaps. No selector produces one; build it and compose
     it onto a view as an `IndexTransform` key.
 
-    Composition through a unit-stride map, translation, point evaluation and
-    chunk planning keep it compact; other operations expand it to its
-    `ArrayMap`. TensorStore and ndsel have no such map, so `to_json` writes the
+    Indexing and composition keep it compact where they can: a step-1 slice of
+    the runs' axis is a window of the runs (one run left is a `DimensionMap`),
+    other axes leave it untouched, and integers, strided slices and index
+    arrays look up only the positions they select. Translation, point
+    evaluation and chunk planning keep it too; `intersect`, `inverted` and the
+    writer expand it to its `ArrayMap`. TensorStore and ndsel have no such map, so `to_json` writes the
     expanded `index_array`, and a transform compares unequal to its expanded form.
 
     Examples
@@ -495,6 +498,18 @@ class RangeMap:
             self.starts[run] + positions - (ends[run] - self.lengths[run]), dtype=np.intp
         )
 
+    def window(self, begin: int, end: int, input_dimension: int) -> RangeMap:
+        """The runs covering positions `[begin, end)`, laid along `input_dimension`."""
+        ends = np.cumsum(self.lengths)
+        first = int(np.searchsorted(ends, begin, side="right"))
+        last = int(np.searchsorted(ends - self.lengths, end, side="left"))
+        run_begin = (ends - self.lengths)[first:last]
+        lo = np.maximum(run_begin, begin)
+        hi = np.minimum(ends[first:last], end)
+        keep = hi > lo
+        starts = self.starts[first:last] + (lo - run_begin)
+        return RangeMap(input_dimension, starts[keep], (hi - lo)[keep])
+
     def bounds(self) -> tuple[int, int]:
         """Smallest and largest coordinate, inclusive; requires a nonzero `size`."""
         nonempty = self.lengths > 0
@@ -506,6 +521,17 @@ class RangeMap:
         k = self.input_dimension
         shape = (1,) * k + (self.size,) + (1,) * (rank - k - 1)
         return array_map_or_constant(expand_runs(self.starts, self.lengths).reshape(shape))
+
+
+def range_map_or_dimension(m: RangeMap, origin: int) -> RangeMap | DimensionMap:
+    """A `RangeMap`, collapsed to the `DimensionMap` it equals when it holds at most one run.
+
+    `origin` is the lower bound of the domain axis the runs are laid along.
+    """
+    if m.starts.size > 1:
+        return m
+    start = int(m.starts[0]) if m.starts.size else origin
+    return DimensionMap(input_dimension=m.input_dimension, offset=checked_affine(start, -1, origin))
 
 
 OutputIndexMap = ConstantMap | DimensionMap | ArrayMap | RangeMap

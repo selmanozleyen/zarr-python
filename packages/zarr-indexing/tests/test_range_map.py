@@ -4,11 +4,12 @@ from typing import Any
 
 import numpy as np
 import pytest
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from zarr_indexing import (
     ArrayMap,
+    ConstantMap,
     DimensionMap,
     IndexDomain,
     IndexTransform,
@@ -18,6 +19,11 @@ from zarr_indexing import (
     plan_chunks,
 )
 from zarr_indexing.grid import dimension_grids_from_chunks
+from zarr_indexing.testing.strategies import (
+    basic_selections,
+    orthogonal_selections,
+    vectorized_selections,
+)
 
 
 def runs_transform(starts: list[int], lengths: list[int], ncols: int) -> IndexTransform:
@@ -48,7 +54,7 @@ def test_result_matches_numpy(case: tuple[int, int, list[int], list[int], tuple[
     source = np.arange(nrows * ncols).reshape(nrows, ncols)
     view = LazyArray.from_numpy(source).with_parts(parts)[runs_transform(starts, lengths, ncols)]
     expected = source[oracle(starts, lengths)]
-    assert isinstance(view.transform.output[0], RangeMap)
+    assert not isinstance(view.transform.output[0], ArrayMap)
     np.testing.assert_array_equal(view.result(), expected)
     np.testing.assert_array_equal(view.unpartitioned().result(), expected)
 
@@ -130,7 +136,9 @@ def test_transform_operations_match_expanded() -> None:
     assert transform.apply((3, 1)) == expanded.apply((3, 1))
     points = np.stack(np.meshgrid(np.arange(5), np.arange(2), indexing="ij"), axis=-1)
     np.testing.assert_array_equal(transform.apply_many(points), expanded.apply_many(points))
-    assert transform[1:4] == expanded[1:4]
+    np.testing.assert_array_equal(
+        transform[1:4].apply_many(points[1:4]), expanded[1:4].apply_many(points[1:4])
+    )
     assert IndexTransform.from_json(transform.to_json()) == expanded
     assert transform != expanded
     assert "runs(2)" in transform.selection_repr
@@ -285,3 +293,89 @@ def test_correlated_plan_keeps_transform() -> None:
     )
     plan = plan_chunks(transform, dimension_grids_from_chunks((3, 4), shape=(10, 6)))
     assert plan.partition().transform == plan.transform
+
+
+SELECTIONS = {
+    "basic": (basic_selections, lambda v: v),
+    "orthogonal": (orthogonal_selections, lambda v: v.oindex),
+    "vectorized": (vectorized_selections, lambda v: v.vindex),
+}
+
+
+@settings(deadline=None)
+@given(case=runs_case(), mode=st.sampled_from(sorted(SELECTIONS)), data=st.data())
+def test_selection_on_run_view_matches_plain_view(
+    case: tuple[int, int, list[int], list[int], tuple[int, int]], mode: str, data: st.DataObject
+) -> None:
+    # The oracle is the same selection on a view of the materialized rows, with no runs.
+    nrows, ncols, starts, lengths, parts = case
+    assume(sum(lengths) > 0)  # the selection strategies need a nonempty axis
+    source = np.arange(nrows * ncols).reshape(nrows, ncols)
+    view = LazyArray.from_numpy(source).with_parts(parts)[runs_transform(starts, lengths, ncols)]
+    plain = LazyArray.from_numpy(source[oracle(starts, lengths)])
+    strategy, accessor = SELECTIONS[mode]
+    selection = data.draw(strategy(view.shape))
+    np.testing.assert_array_equal(
+        accessor(view)[selection].result(), accessor(plain)[selection].result()
+    )
+
+
+def run_view() -> LazyArray:
+    return LazyArray.from_numpy(np.arange(40 * 3).reshape(40, 3))[
+        runs_transform([30, 2, 10], [4, 6, 5], 3)
+    ]
+
+
+ROWS = np.arange(40 * 3).reshape(40, 3)[oracle([30, 2, 10], [4, 6, 5])]
+
+
+@pytest.mark.parametrize(
+    ("select", "kind"),
+    [
+        (lambda v: v[:, 1:3], RangeMap),  # another axis: runs untouched
+        (lambda v: v[2:12], RangeMap),  # a window across runs
+        (lambda v: v[5:9], DimensionMap),  # a window inside one run is a slice
+        (lambda v: v[3], ConstantMap),
+        (lambda v: v[::2], ArrayMap),  # strided: only the selected positions
+        (lambda v: v[::-1], ArrayMap),
+        (lambda v: v.oindex[[14, 0, 7], :], ArrayMap),
+        (lambda v: v.vindex[[1, 2], [0, 2]], ArrayMap),
+    ],
+    ids=[
+        "other-axis",
+        "window",
+        "window-one-run",
+        "int",
+        "strided",
+        "reversed",
+        "oindex",
+        "vindex",
+    ],
+)
+def test_selection_keeps_runs_where_it_can(select: Any, kind: type) -> None:
+    view = select(run_view())
+    expected = select(LazyArray.from_numpy(ROWS)).result()
+    assert isinstance(view.transform.output[0], kind)
+    np.testing.assert_array_equal(view.result(), expected)
+
+
+def test_window_inside_one_run_is_a_box() -> None:
+    view = run_view()[5:9]
+    assert view.is_box
+    assert view.strides() == (1, 1)
+
+
+def test_newaxis_renumbers_runs() -> None:
+    view = run_view()[None, 2:12]
+    (m,) = [m for m in view.transform.output if isinstance(m, RangeMap)]
+    assert m.input_dimension == 1
+    np.testing.assert_array_equal(view.result(), ROWS[None, 2:12])
+
+
+def test_window_of_huge_runs_does_not_expand() -> None:
+    # A window over 2e9 cells is O(runs); expanding would not fit in memory.
+    m = RangeMap(0, np.array([0, 10**12]), np.array([10**9, 10**9]))
+    transform = IndexTransform(IndexDomain.from_shape((m.size,)), (m,))
+    window = transform[10**9 - 2 : 10**9 + 3]
+    assert window.output[0] == RangeMap(0, np.array([10**9 - 2, 10**12]), np.array([2, 3]))
+    assert transform[10**9 + 7].output[0] == ConstantMap(10**12 + 7)

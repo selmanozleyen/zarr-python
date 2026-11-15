@@ -607,7 +607,7 @@ class IndexTransform:
         Integer indices must lie inside the domain and drop their input
         dimension; `None` inserts a size-1 dimension.
         """
-        return _apply_basic_indexing(self.expand_ranges(), selection)
+        return _apply_basic_indexing(self, selection)
 
     def translate_domain_by(self, shift: tuple[int, ...]) -> IndexTransform:
         """Shift the *input* domain by `shift`, preserving which cells are addressed.
@@ -1462,6 +1462,9 @@ def _compose_selection(
 
 def _apply_basic_indexing(transform: IndexTransform, selection: Any) -> IndexTransform:
     """Apply basic indexing (int, slice, ellipsis, newaxis) to an IndexTransform."""
+    if any(isinstance(m, RangeMap) for m in transform.output):
+        # Composition evaluates runs at the selected positions; a step-1 slice keeps them.
+        return IndexTransform.identity(transform.domain)[selection].compose(transform)
     normalized = _normalize_basic_selection(selection, transform.domain.ndim)
 
     new_inclusive_min: list[int] = []
@@ -1577,7 +1580,7 @@ class _OIndexHelper:
         self._transform = transform
 
     def __getitem__(self, selection: Any) -> IndexTransform:
-        return _apply_oindex(self._transform.expand_ranges(), selection)
+        return _apply_oindex(self._transform, selection)
 
 
 def _normalize_oindex_selection(
@@ -1638,7 +1641,7 @@ def _apply_oindex(transform: IndexTransform, selection: Any) -> IndexTransform:
     broadcasts along.
     """
     validate_advanced_selection(selection, transform.domain, "orthogonal")
-    if any(isinstance(m, ArrayMap) for m in transform.output):
+    if any(isinstance(m, (ArrayMap, RangeMap)) for m in transform.output):
         return _compose_selection(transform, selection, "orthogonal")
     normalized = _normalize_oindex_selection(selection, transform.domain.ndim)
 
@@ -1724,7 +1727,7 @@ class _VIndexHelper:
         self._transform = transform
 
     def __getitem__(self, selection: Any) -> IndexTransform:
-        return _apply_vindex(self._transform.expand_ranges(), selection)
+        return _apply_vindex(self._transform, selection)
 
 
 def _broadcast_insertion_point(array_dims: Sequence[int], slice_dims: Sequence[int]) -> int:
@@ -1776,7 +1779,7 @@ def _apply_vindex(transform: IndexTransform, selection: Any) -> IndexTransform:
     `_apply_oindex`.
     """
     validate_advanced_selection(selection, transform.domain, "vectorized")
-    if any(isinstance(m, ArrayMap) for m in transform.output):
+    if any(isinstance(m, (ArrayMap, RangeMap)) for m in transform.output):
         return _compose_selection(transform, selection, "vectorized")
     if not isinstance(selection, tuple):
         selection = (selection,)
