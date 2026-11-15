@@ -55,7 +55,6 @@ from zarr_indexing.output_map import (
     DimensionMap,
     OutputIndexMap,
     RangeMap,
-    _expand_runs,  # pyright: ignore[reportPrivateUsage]
 )
 from zarr_indexing.transform import (
     IndexTransform,
@@ -948,7 +947,7 @@ def _indexed_piece(axis: IndexedSet, row: int, rank: int, origin: int) -> _AxisP
 
 
 def _range_piece(axis: RangeSet, row: int, rank: int, origin: int) -> _AxisPiece:
-    """One row of a run table: a slice when the chunk holds one piece, else index arrays."""
+    """One row of a run table: a slice when the chunk holds one piece, else runs."""
     run = axis.run(row)
     k = axis.input_dimension
     c_start = int(axis.chunk_start[row])
@@ -967,15 +966,14 @@ def _range_piece(axis: RangeSet, row: int, rank: int, origin: int) -> _AxisPiece
             DimensionMap(input_dimension=k, offset=origin + int(position[0])),
             start == 0 and count == c_extent,
         )
-    shape = (1,) * k + (count,) + (1,) * (rank - k - 1)
     return (
         int(axis.chunk[row]),
         c_start,
         c_extent,
         k,
         count,
-        ArrayMap(index_array=_expand_runs(local, length).reshape(shape)),
-        ArrayMap(index_array=_expand_runs(position, length).reshape(shape), offset=origin),
+        RangeMap(k, local, length),
+        RangeMap(k, checked_affine(origin, 1, position), length),
         False,
     )
 
@@ -1110,7 +1108,7 @@ class GridPartition:
             chunk_min.append(c_start)
             chunk_max.append(c_start + c_extent)
             chunk_maps.append(chunk_map)
-            if isinstance(chunk_map, ArrayMap):
+            if isinstance(chunk_map, (ArrayMap, RangeMap)):
                 has_array = True
             if k is not None:
                 shape[k] = extent

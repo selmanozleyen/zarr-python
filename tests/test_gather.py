@@ -158,3 +158,49 @@ def test_fused_pipeline(shards: tuple[int, ...] | None) -> None:
         got = gather([arr.lazy[2:10, 1:9], arr.lazy.vindex[[0, 16], [12, 3]]])
     assert_array_equal(got[0], DATA[2:10, 1:9])
     assert_array_equal(got[1], DATA[[0, 16], [12, 3]])
+
+
+def runs_view(arr: Any, starts: list[int], lengths: list[int]) -> Any:
+    m = zarr_indexing.RangeMap(0, np.array(starts, dtype=np.intp), np.array(lengths, dtype=np.intp))
+    domain = zarr_indexing.IndexDomain.from_shape((m.size, *arr.shape[1:]))
+    rest = tuple(zarr_indexing.DimensionMap(j) for j in range(1, arr.ndim))
+    return arr.lazy[zarr_indexing.IndexTransform(domain, (m, *rest))]
+
+
+def rows_of(starts: list[int], lengths: list[int]) -> np.ndarray[Any, Any]:
+    pieces = [np.arange(s, s + n) for s, n in zip(starts, lengths, strict=True)]
+    return np.concatenate(pieces) if pieces else np.empty(0, dtype=int)
+
+
+@settings(deadline=None)
+@given(
+    shards=st.sampled_from([None, (8, 8), (16, 16)]),
+    runs=st.lists(
+        st.integers(0, 16).flatmap(lambda s: st.tuples(st.just(s), st.integers(0, 17 - s)))
+    ),
+)
+def test_run_views_match_numpy(shards: tuple[int, ...] | None, runs: list[tuple[int, int]]) -> None:
+    arr = make_array(shards=shards)
+    starts, lengths = [s for s, _ in runs], [n for _, n in runs]
+    (got,) = gather([runs_view(arr, starts, lengths)])
+    assert_array_equal(got, DATA[rows_of(starts, lengths)])
+
+
+def test_pipeline_receives_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Rows 1:3, 5:8 and 9:10 share the first shard; they reach the pipeline as runs.
+    arr = make_array(shards=(16, 16))
+    reads: list[Any] = []
+    real = CodecPipeline.read_gather
+
+    async def spy(self: CodecPipeline, requests: Any) -> Any:
+        requests = list(requests)
+        reads.extend(transform for _, _, chunk_reads in requests for transform, _ in chunk_reads)
+        return await real(self, requests)
+
+    monkeypatch.setattr(CodecPipeline, "read_gather", spy)
+    (got,) = gather([runs_view(arr, [1, 5, 9], [2, 3, 1])])
+    assert_array_equal(got, DATA[rows_of([1, 5, 9], [2, 3, 1])])
+    (transform,) = reads
+    assert transform.output[0] == zarr_indexing.RangeMap(
+        0, np.array([1, 5, 9]), np.array([2, 3, 1])
+    )

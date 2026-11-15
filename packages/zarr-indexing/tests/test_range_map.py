@@ -8,7 +8,6 @@ from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 import zarr_indexing._composition
-import zarr_indexing.chunk_resolution
 import zarr_indexing.output_map
 from zarr_indexing import (
     ArrayMap,
@@ -73,11 +72,7 @@ def expanded_cells(monkeypatch: pytest.MonkeyPatch) -> list[int]:
         cells.append(int(lengths.sum()))
         return real(starts, lengths)
 
-    for module in (
-        zarr_indexing.output_map,
-        zarr_indexing._composition,
-        zarr_indexing.chunk_resolution,
-    ):
+    for module in (zarr_indexing.output_map, zarr_indexing._composition):
         monkeypatch.setattr(module, "_expand_runs", spy)
     return cells
 
@@ -110,10 +105,12 @@ def test_run_set_pieces() -> None:
 
 
 def test_run_set_two_pieces_in_one_chunk() -> None:
+    # Pieces that do not continue each other stay runs in the chunk's projection.
     transform = runs_transform([0, 2], [1, 1], 1)
     plan = plan_chunks(transform, dimension_grids_from_chunks((4, 1), shape=(4, 1)))
     (projection,) = list(plan)
-    assert isinstance(projection.chunk_transform.output[0], ArrayMap)
+    assert projection.chunk_transform.output[0] == RangeMap(0, np.array([0, 2]), np.array([1, 1]))
+    assert projection.cell_transform.output[0] == RangeMap(0, np.array([0, 1]), np.array([1, 1]))
     assert projection.coverage == "unknown"
 
 

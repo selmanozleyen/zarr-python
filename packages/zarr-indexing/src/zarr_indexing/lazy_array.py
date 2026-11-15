@@ -340,6 +340,7 @@ def _partition_out_selection(
     cell_transform: IndexTransform,
 ) -> tuple[Any, ...]:
     """Lower ``cell_transform`` to NumPy selectors on the request buffer."""
+    cell_transform = cell_transform.expand_ranges()
     domain = cell_transform.domain
     # A compact cell transform may permute a slice axis and a gather axis.
     # NumPy's mixed basic/advanced selectors would place the gathered block

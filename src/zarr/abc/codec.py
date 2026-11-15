@@ -587,7 +587,7 @@ def _chunk_hull(
     transforms: Sequence[IndexTransform],
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
     """The smallest box, `[lo, hi)` per axis, holding every coordinate the transforms read."""
-    from zarr_indexing import ConstantMap, DimensionMap
+    from zarr_indexing import ConstantMap, DimensionMap, RangeMap
 
     hull: list[tuple[int, int]] | None = None
     for transform in transforms:
@@ -601,6 +601,9 @@ def _chunk_hull(
                 first = m.offset + m.stride * domain.inclusive_min[d]
                 last = m.offset + m.stride * (domain.exclusive_max[d] - 1)
                 box.append((min(first, last), max(first, last) + 1))
+            elif isinstance(m, RangeMap):
+                lo, hi = m.bounds()
+                box.append((lo, hi + 1))
             else:
                 coordinates = m.offset + m.stride * m.index_array
                 box.append((int(coordinates.min()), int(coordinates.max()) + 1))
