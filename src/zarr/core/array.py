@@ -3948,7 +3948,7 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
     def lazy(self) -> LazyArray:
         """Experimental: a `zarr_indexing.LazyArray` view that reads only on `.result()`.
 
-        See [lazy indexing](../user-guide/experimental.md#lazy-indexing-with-arraylazy).
+        See [lazy indexing](../../user-guide/experimental.md#lazy-indexing-with-arraylazy).
         """
         if not zarr_config.get("experimental_lazy_indexing"):
             raise LazyIndexingDisabledError(
