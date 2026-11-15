@@ -21,7 +21,7 @@ substituting the outer map into the inner one:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -156,7 +156,7 @@ def _compose_single(
     if isinstance(inner_map, DimensionMap):
         return _compose_dimension(outer, inner_map)
 
-    return _compose_array(outer, inner_map, inner_origin)
+    return _compose_array(outer, cast("ArrayMap", inner_map), inner_origin)
 
 
 def _compose_dimension(outer: IndexTransform, inner_map: DimensionMap) -> OutputIndexMap:
@@ -226,7 +226,7 @@ def _positions_for_axis(
         return outer_map.offset - inner_origin
     if isinstance(outer_map, DimensionMap):
         return _dimension_positions(outer, outer_map, inner_origin)
-    return _array_positions(outer_map, inner_origin)
+    return _array_positions(cast("ArrayMap", outer_map), inner_origin)
 
 
 def _compose_array(

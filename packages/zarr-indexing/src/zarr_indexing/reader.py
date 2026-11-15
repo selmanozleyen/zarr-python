@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -461,6 +461,7 @@ def _lower_general(array: Any, transform: IndexTransform) -> Any:
             residual_positions.append(axis)
             residual_axis_dims.append(m.input_dimension)
         else:
+            m = cast("DimensionMap", m)
             d = m.input_dimension
             lo = transform.domain.inclusive_min[d]
             hi = transform.domain.exclusive_max[d]
@@ -585,6 +586,7 @@ def _decompose(
             key.append(pushed)
             residual.append(local)
         else:
+            output_map = cast("ArrayMap", output_map)
             coordinates = checked_affine(
                 output_map.offset, output_map.stride, output_map.index_array
             )

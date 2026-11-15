@@ -433,6 +433,7 @@ class IndexTransform:
                 inverse_min.append(output_map.offset)
                 inverse_max.append(output_map.offset + 1)
                 continue
+            output_map = cast("DimensionMap", output_map)
             if output_map.stride not in (-1, 1):
                 raise ValueError(
                     "cannot invert transform: DimensionMap stride must be +1 or -1, "
@@ -819,7 +820,10 @@ class IndexTransform:
             "input_inclusive_min": list(self.domain.inclusive_min),
             "input_exclusive_max": list(self.domain.exclusive_max),
             "input_labels": emit_labels(self.domain.labels, self.domain.ndim),
-            "output": [m.to_json() for m in self.expand_ranges().output],
+            "output": [
+                cast("ConstantMap | DimensionMap | ArrayMap", m).to_json()
+                for m in self.expand_ranges().output
+            ],
         }
 
     @classmethod
@@ -1042,7 +1046,7 @@ def _intersect_orthogonal(
             new_output.append(m)
 
         else:
-            # m: ArrayMap (OutputIndexMap = ConstantMap | DimensionMap | ArrayMap)
+            m = cast("ArrayMap", m)
             # Orthogonal: the array varies over a single axis. Filter along that
             # axis and keep the array at full input rank so the singleton axes
             # it broadcasts over are preserved.
@@ -1269,6 +1273,7 @@ def _intersect_general(
         elif isinstance(m, ConstantMap):
             new_output.append(m)
         else:
+            m = cast("DimensionMap", m)
             new_output.append(
                 DimensionMap(
                     input_dimension=new_input_dim_of[m.input_dimension],
@@ -1539,7 +1544,7 @@ def _apply_basic_indexing(transform: IndexTransform, selection: Any) -> IndexTra
             else:
                 raise RuntimeError(f"unexpected: dimension {d} not handled")
         else:
-            # m: ArrayMap (OutputIndexMap = ConstantMap | DimensionMap | ArrayMap).
+            m = cast("ArrayMap", m)
             # A result narrowed to a single coordinate collapses to the
             # ConstantMap it equals — whether an integer consumed the dependency
             # axis or a slice narrowed it to one entry — so a non-empty ArrayMap

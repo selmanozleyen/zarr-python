@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
@@ -85,6 +85,7 @@ def write_into(
                 first = transform.domain.inclusive_min[axis]
                 last = transform.domain.exclusive_max[axis] - 1
             else:
+                output = cast("ArrayMap", output)
                 first = int(output.index_array.min())
                 last = int(output.index_array.max())
             endpoints = (
@@ -140,6 +141,7 @@ def _write_affine(source: Any, transform: IndexTransform, broadcast: Any) -> boo
         if isinstance(output, ConstantMap):
             selection.append(output.offset)
             continue
+        output = cast("DimensionMap", output)
         axis = output.input_dimension
         start = output.offset + output.stride * transform.domain.inclusive_min[axis]
         if output.stride < 0:

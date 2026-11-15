@@ -346,7 +346,7 @@ def _partition_out_selection(
     # differently from the synthetic domain; broadcast coordinate selectors
     # retain that domain's axis order for scatter.
     dependencies = [
-        m.input_dimension if isinstance(m, DimensionMap) else m.dependent_axis
+        m.input_dimension if isinstance(m, DimensionMap) else cast("ArrayMap", m).dependent_axis
         for m in cell_transform.output
         if not isinstance(m, ConstantMap)
     ]
@@ -372,7 +372,8 @@ def _partition_out_selection(
                 )
                 coordinates = output_map.offset + output_map.stride * axis.reshape(shape)
             else:
-                coordinates = output_map.offset + output_map.stride * output_map.index_array
+                array_map = cast("ArrayMap", output_map)
+                coordinates = array_map.offset + array_map.stride * array_map.index_array
             correlated_selectors.append(np.asarray(coordinates, dtype=np.intp))
         return tuple(correlated_selectors)
 
@@ -393,8 +394,9 @@ def _partition_out_selection(
                 )
             )
         else:
+            array_map = cast("ArrayMap", output_map)
             selectors.append(
-                (output_map.offset + output_map.stride * output_map.index_array.ravel()).astype(
+                (array_map.offset + array_map.stride * array_map.index_array.ravel()).astype(
                     np.intp
                 )
             )
@@ -863,7 +865,8 @@ class LazyArray:
         if not self.is_box:
             return None
         return tuple(
-            1 if isinstance(m, ConstantMap) else abs(m.stride) for m in self._transform.output
+            1 if isinstance(m, ConstantMap) else abs(cast("DimensionMap", m).stride)
+            for m in self._transform.output
         )
 
     # -- partitioning -------------------------------------------------------
