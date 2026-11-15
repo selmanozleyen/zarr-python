@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.15'",
@@ -3865,6 +3865,7 @@ dev = [
     { name = "towncrier" },
     { name = "universal-pathlib" },
     { name = "uv" },
+    { name = "zarr-indexing" },
 ]
 docs = [
     { name = "astroid" },
@@ -3970,6 +3971,7 @@ dev = [
     { name = "towncrier", specifier = "==26.9.0" },
     { name = "universal-pathlib" },
     { name = "uv", specifier = "==0.13.7" },
+    { name = "zarr-indexing", specifier = ">=0.3.0" },
 ]
 docs = [
     { name = "astroid", specifier = "==4.3.4" },

@@ -161,6 +161,8 @@ dev = [
     {include-group = "docs"},
     "universal-pathlib",
     "mypy==2.4.1",
+    # mypy checks `Array.lazy` against zarr-indexing's types.
+    "zarr-indexing>=0.3.0",
 ]
 
 [tool.coverage.report]

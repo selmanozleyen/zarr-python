@@ -9,6 +9,7 @@ __all__ = [
     "ContainsGroupError",
     "DataTypeValidationError",
     "GroupNotFoundError",
+    "LazyIndexingDisabledError",
     "MetadataValidationError",
     "NegativeStepError",
     "NodeTypeValidationError",
@@ -100,6 +101,12 @@ class MetadataValidationError(BaseZarrError):
 class UnknownCodecError(BaseZarrError):
     """
     Raised when an unknown codec was used.
+    """
+
+
+class LazyIndexingDisabledError(BaseZarrError):
+    """
+    Raised when accessing `Array.lazy` while the ``experimental_lazy_indexing`` configuration option is off.
     """
 
 

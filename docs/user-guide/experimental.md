@@ -93,41 +93,29 @@ On many-core nodes a pool sized to `cpu_count` can oversubscribe workloads that 
 
 ## Lazy indexing with `Array.lazy`
 
-`Array.lazy` (and `AsyncArray.lazy`) returns a lazy view of the array. Indexing the view
-does no IO: it composes the selection, and further selections compose onto it. Data is
-read only when you call `.result()` or convert the view with `numpy.asarray`. Eager
-indexing with `arr[...]` is unchanged.
-
-Lazy indexing is provided by the [`zarr-indexing`](https://zarr.readthedocs.io/projects/zarr-indexing/)
-package and is off by default. Install the extra and turn on the flag:
+`arr.lazy[...]` returns a view that composes further selections without IO and reads on
+`.result()` or `numpy.asarray`. Eager `arr[...]` is unchanged. It is backed by
+[`zarr-indexing`](https://zarr.readthedocs.io/projects/zarr-indexing/) and is off by default:
 
 ```bash
 pip install "zarr[lazy]"
-export ZARR_EXPERIMENTAL_LAZY_INDEXING=True
+export ZARR_EXPERIMENTAL_LAZY_INDEXING=True  # or zarr.config.set({"experimental_lazy_indexing": True})
 ```
-
-or set it in code with `zarr.config.set({"experimental_lazy_indexing": True})`.
 
 ```python
-import numpy as np
-import zarr
-
-zarr.config.set({"experimental_lazy_indexing": True})
-arr = zarr.create_array({}, shape=(100, 100), chunks=(10, 10), dtype="int32")
-arr[:] = np.arange(10_000).reshape(100, 100)
-
-view = arr.lazy[10:20, ::2]        # no IO
+view = arr.lazy[10:20, ::2]         # no IO
 view = view[3:5].oindex[:, [0, 4]]  # still no IO
-view.shape                          # (2, 2)
-view.result()                       # reads now; equals arr[13:15, ::2][:, [0, 4]]
+view.result()                       # reads; equals arr[13:15, ::2][:, [0, 4]]
 ```
 
-The view is a [`zarr_indexing.LazyArray`](https://zarr.readthedocs.io/projects/zarr-indexing/);
-see its documentation for the supported selections. Unlike eager zarr indexing, lazy
-views accept negative slice steps. A read is split along the array's read grid, so a
-sharded array is read one inner chunk at a time. `result()` is synchronous, including on
-a view taken from an `AsyncArray`; inside a coroutine use
-`await asyncio.to_thread(view.result)`.
+Views follow zarr-indexing's selection rules, which differ from eager indexing:
+
+- `[...]` takes integers and slices only, including negative steps; pass integer arrays through `.oindex`.
+- `.vindex` applies scalar indices first, so `lazy.vindex[0, ..., [1, 2]]` on shape `(2, 3, 4)` has shape `(3, 2)`, not NumPy's `(2, 3)`.
+- A sharded array is read one inner chunk at a time: a view over a shard of 64 inner chunks makes 64 store reads where eager indexing makes one. `view.unpartitioned().result()` reads it in one call.
+- Assignment, `arr.lazy[...] = values`, writes through.
+- A view does not follow a later `resize`; take a new one.
+- `result()` is synchronous, also on `AsyncArray.lazy`.
 
 ## `CacheStore`
 

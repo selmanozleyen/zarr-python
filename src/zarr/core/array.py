@@ -146,6 +146,7 @@ from zarr.core.sync import sync
 from zarr.errors import (
     ArrayNotFoundError,
     ChunkNotFoundError,
+    LazyIndexingDisabledError,
     MetadataValidationError,
     ZarrDeprecationWarning,
     ZarrUserWarning,
@@ -1747,12 +1748,8 @@ class AsyncArray[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
 
     @property
     def lazy(self) -> LazyArray:
-        """Experimental lazy indexing, see [Array.lazy][zarr.Array.lazy].
-
-        Selection is lazy, but `result()` reads synchronously. Inside a coroutine,
-        `await asyncio.to_thread(view.result)` keeps the event loop free.
-        """
-        return _lazy(Array(self))
+        """Experimental lazy indexing, see [Array.lazy][zarr.Array.lazy]. `result()` is synchronous."""
+        return Array(self).lazy
 
     async def resize(self, new_shape: ShapeLike, delete_outside_chunks: bool = True) -> None:
         """
@@ -3949,19 +3946,23 @@ class Array[T_ArrayMetadata: (ArrayV2Metadata, ArrayV3Metadata)]:
 
     @property
     def lazy(self) -> LazyArray:
-        """Experimental lazy indexing.
+        """Experimental: a `zarr_indexing.LazyArray` view that reads only on `.result()`.
 
-        `arr.lazy[selection]` returns a `zarr_indexing.LazyArray`: a view that
-        composes further `[...]`, `.oindex[...]` and `.vindex[...]` selections
-        without reading, and reads only when `.result()` (or `numpy.asarray`) is
-        called. Eager indexing through `arr[...]` is unchanged.
-
-        Disabled by default. Enable it with
-        `zarr.config.set({'experimental_lazy_indexing': True})` or the environment
-        variable `ZARR_EXPERIMENTAL_LAZY_INDEXING=True`, and install the
-        `zarr-indexing` package (`pip install 'zarr[lazy]'`).
+        See [lazy indexing](../user-guide/experimental.md#lazy-indexing-with-arraylazy).
         """
-        return _lazy(self)
+        if not zarr_config.get("experimental_lazy_indexing"):
+            raise LazyIndexingDisabledError(
+                "Lazy indexing is experimental and disabled by default. Enable it with "
+                "zarr.config.set({'experimental_lazy_indexing': True}) or "
+                "ZARR_EXPERIMENTAL_LAZY_INDEXING=True"
+            )
+        try:
+            from zarr_indexing import LazyArray
+        except ImportError as e:
+            raise ImportError(
+                "Lazy indexing requires zarr-indexing: pip install 'zarr[lazy]'"
+            ) from e
+        return LazyArray(self)
 
     def resize(self, new_shape: ShapeLike) -> None:
         """
@@ -4181,24 +4182,6 @@ type CompressorsLike = (
     | None
 )
 type SerializerLike = dict[str, JSON] | ArrayBytesCodec | Literal["auto"]
-
-
-def _lazy(array: AnyArray) -> LazyArray:
-    """Wrap `array` in a `zarr_indexing.LazyArray`, if lazy indexing is enabled."""
-    if not zarr_config.get("experimental_lazy_indexing"):
-        raise RuntimeError(
-            "Lazy indexing is experimental and disabled by default. "
-            "Enable it with: zarr.config.set({'experimental_lazy_indexing': True}) "
-            "or set the environment variable ZARR_EXPERIMENTAL_LAZY_INDEXING=True"
-        )
-    try:
-        from zarr_indexing import LazyArray
-    except ImportError as e:
-        raise ImportError(
-            "Lazy indexing requires the zarr-indexing package. "
-            "Install it with: pip install 'zarr[lazy]'"
-        ) from e
-    return LazyArray(array)
 
 
 class ShardsConfigParam(TypedDict):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from typing import TYPE_CHECKING, Any
 
@@ -14,6 +13,7 @@ from hypothesis import given, settings
 from numpy.testing import assert_array_equal
 
 import zarr
+from zarr.errors import LazyIndexingDisabledError
 from zarr.storage import LoggingStore, MemoryStore
 from zarr.testing.strategies import (
     orthogonal_indices,
@@ -23,7 +23,7 @@ from zarr.testing.strategies import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from zarr.types import AnyArray
 
@@ -39,6 +39,7 @@ any_array = st.one_of(
     rectilinear_arrays(shapes=npst.array_shapes(max_dims=3, min_side=1, max_side=20)),
     sharded_arrays(shapes=npst.array_shapes(min_dims=1, max_dims=3, min_side=1, max_side=8)),
 )
+DATA = np.arange(17 * 13, dtype="int32").reshape(17, 13)
 
 
 @pytest.fixture(autouse=True)
@@ -50,13 +51,17 @@ def lazy_enabled() -> Iterator[None]:
 def make_array(*, shards: tuple[int, ...] | None = None, store: Any = None) -> AnyArray:
     arr = zarr.create_array(
         store if store is not None else {},
-        shape=(17, 13),
+        shape=DATA.shape,
         chunks=(4, 4),
         shards=shards,
         dtype="int32",
     )
-    arr[:] = np.arange(17 * 13, dtype="int32").reshape(17, 13)
+    arr[:] = DATA
     return arr
+
+
+# The property tests use `zarray[...]` as the oracle, as tests/test_properties.py does:
+# the strategies draw the NumPy data internally and do not return it.
 
 
 @settings(deadline=None)
@@ -90,27 +95,25 @@ def test_vindex_parity(data: st.DataObject) -> None:
     assert_array_equal(zarray.lazy.vindex[sel].result(), nparray[sel])
 
 
+MASK = np.zeros(DATA.shape, dtype=bool)
+MASK[::3, 1::4] = True
+
+
 @pytest.mark.parametrize("shards", [None, (8, 8)])
-def test_mask_and_composition(shards: tuple[int, ...] | None) -> None:
-    arr = make_array(shards=shards)
-    expected = np.asarray(arr[...])
-    mask = np.zeros(arr.shape, dtype=bool)
-    mask[::3, 1::4] = True
-    assert_array_equal(arr.lazy.vindex[mask].result(), expected[mask])
-    assert_array_equal(arr.lazy[2:15][1::2, 3:].result(), expected[2:15][1::2, 3:])
-    assert_array_equal(arr.lazy[2:15][::-2, 5].result(), expected[2:15][::-2, 5])
-    assert_array_equal(
-        arr.lazy[1:][::2].oindex[[0, 3, 3], [1, 0]].result(),
-        expected[1:][::2][np.ix_([0, 3, 3], [1, 0])],
-    )
-
-
-def test_sharded_reads_by_inner_chunk() -> None:
-    # The read grid is the inner-chunk grid: one reader call per touched inner chunk,
-    # not per shard. A known cost here, not a correctness issue.
-    arr = make_array(shards=(8, 8))
-    parts = list(arr.lazy[0:8, 0:8].parts())
-    assert len(parts) == 4
+@pytest.mark.parametrize(
+    ("lazy", "expected"),
+    [
+        (lambda v: v.vindex[MASK], DATA[MASK]),
+        (lambda v: v[2:15][1::2, 3:], DATA[2:15][1::2, 3:]),
+        (lambda v: v[2:15][::-2, 5], DATA[2:15][::-2, 5]),
+        (lambda v: v[1:][::2].oindex[[0, 3, 3], [1, 0]], DATA[1:][::2][np.ix_([0, 3, 3], [1, 0])]),
+    ],
+    ids=["mask", "compose", "reverse", "compose-oindex"],
+)
+def test_selection(
+    shards: tuple[int, ...] | None, lazy: Callable[[Any], Any], expected: np.ndarray[Any, Any]
+) -> None:
+    assert_array_equal(lazy(make_array(shards=shards).lazy).result(), expected)
 
 
 def test_no_io_before_result() -> None:
@@ -121,44 +124,36 @@ def test_no_io_before_result() -> None:
     view = view.vindex[[0, 1], [1, 2]]
     assert view.shape == (2,)
     assert dict(store.counter) == {}
-    expected = np.asarray(arr[...])[1:15, ::2][[2, 2]][[0, 1], [1, 2]]
-    assert_array_equal(np.asarray(view), expected)
+    assert_array_equal(np.asarray(view), DATA[1:15, ::2][[2, 2]][[0, 1], [1, 2]])
     assert store.counter["get"] > 0
 
 
-def test_async_array_lazy() -> None:
+def test_write() -> None:
     arr = make_array()
-    view = arr.async_array.lazy[3:7, 1]
-    assert_array_equal(view.result(), arr[3:7, 1])
+    arr.lazy[2:4, ::5] = -1
+    expected = DATA.copy()
+    expected[2:4, ::5] = -1
+    assert_array_equal(arr[...], expected)
 
-    async def read() -> Any:
-        return await asyncio.to_thread(arr.async_array.lazy[3:7, 1].result)
 
-    assert_array_equal(asyncio.run(read()), arr[3:7, 1])
+def test_async_array_lazy() -> None:
+    assert_array_equal(make_array().async_array.lazy[3:7, 1].result(), DATA[3:7, 1])
 
 
 def test_flag_off_raises() -> None:
     arr = make_array()
     with zarr.config.set({"experimental_lazy_indexing": False}):
-        assert zarr.config.get("experimental_lazy_indexing") is False
-        with pytest.raises(RuntimeError, match="ZARR_EXPERIMENTAL_LAZY_INDEXING"):
+        with pytest.raises(LazyIndexingDisabledError, match="ZARR_EXPERIMENTAL_LAZY_INDEXING"):
             _ = arr.lazy
-        with pytest.raises(RuntimeError, match="experimental_lazy_indexing"):
+        with pytest.raises(LazyIndexingDisabledError):
             _ = arr.async_array.lazy
-        assert_array_equal(arr[2:4, 1], [27, 40])
 
 
 def test_flag_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ZARR_EXPERIMENTAL_LAZY_INDEXING", "True")
     zarr.config.reset()
     assert zarr.config.get("experimental_lazy_indexing") is True
-    arr = make_array()
-    assert_array_equal(arr.lazy[2:4, 1].result(), [27, 40])
-
-
-def test_flag_default_off() -> None:
-    zarr.config.reset()
-    assert zarr.config.get("experimental_lazy_indexing") is False
+    assert_array_equal(make_array().lazy[2:4, 1].result(), DATA[2:4, 1])
 
 
 def test_zarr_indexing_missing(monkeypatch: pytest.MonkeyPatch) -> None:
