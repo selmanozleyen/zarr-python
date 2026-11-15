@@ -34,7 +34,6 @@ from zarr_indexing.output_map import (
     OutputIndexMap,
     RangeMap,
     _expand_runs,  # pyright: ignore[reportPrivateUsage]
-    _range_map_or_dimension,  # pyright: ignore[reportPrivateUsage]
     array_map_or_constant,
 )
 from zarr_indexing.transform import IndexTransform
@@ -131,6 +130,17 @@ def _output_bounds(outer: IndexTransform, output_map: OutputIndexMap) -> tuple[i
     first = output_map.offset + output_map.stride * index_lo
     last = output_map.offset + output_map.stride * index_hi
     return min(first, last), max(first, last)
+
+
+def _range_map_or_dimension(m: RangeMap, origin: int) -> RangeMap | DimensionMap:
+    """A `RangeMap`, collapsed to the `DimensionMap` it equals when it holds at most one run.
+
+    `origin` is the lower bound of the domain axis the runs are laid along.
+    """
+    if m.starts.size > 1:
+        return m
+    start = int(m.starts[0]) if m.starts.size else origin
+    return DimensionMap(input_dimension=m.input_dimension, offset=checked_affine(start, -1, origin))
 
 
 def _compose_single(

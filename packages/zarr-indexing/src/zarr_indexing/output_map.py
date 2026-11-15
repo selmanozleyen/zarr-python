@@ -560,15 +560,4 @@ class RangeMap:
         return array_map_or_constant(_expand_runs(self.starts, self.lengths).reshape(shape))
 
 
-def _range_map_or_dimension(m: RangeMap, origin: int) -> RangeMap | DimensionMap:
-    """A `RangeMap`, collapsed to the `DimensionMap` it equals when it holds at most one run.
-
-    `origin` is the lower bound of the domain axis the runs are laid along.
-    """
-    if m.starts.size > 1:
-        return m
-    start = int(m.starts[0]) if m.starts.size else origin
-    return DimensionMap(input_dimension=m.input_dimension, offset=checked_affine(start, -1, origin))
-
-
 OutputIndexMap = ConstantMap | DimensionMap | ArrayMap | RangeMap
