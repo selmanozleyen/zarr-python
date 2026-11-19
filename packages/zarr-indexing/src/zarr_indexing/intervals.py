@@ -119,6 +119,10 @@ class IntervalArrayMap(ArrayMap):
             object.__setattr__(self, "_index_array", cached)
         return cached
 
+    def _with_affine(self, offset: int, stride: int) -> ArrayMap:
+        """The same intervals under a different affine adjustment, still stored as intervals."""
+        return IntervalArrayMap(self.intervals, self.axis, self.rank, offset, stride)
+
     def __reduce__(self) -> tuple[object, tuple[object, int, int]]:
         """Pickle as the plain `ArrayMap` it equals."""
         return (ArrayMap, (self.index_array, self.offset, self.stride))

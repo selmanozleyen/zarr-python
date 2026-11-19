@@ -171,3 +171,27 @@ def test_errors() -> None:
         view.vindex[Intervals([1], [3])]
     with pytest.raises(BoundsCheckError, match="outside"):
         IndexTransform.from_shape((10,)).oindex[Intervals([8], [11])]
+
+
+@pytest.mark.parametrize(
+    "shift",
+    [lambda t: t, lambda t: t.translate((5,)), lambda t: t.translate_domain_by((3,))],
+    ids=["plain", "storage-offset", "domain-origin"],
+)
+def test_plan_maps_every_cell_like_the_index_list(shift: Any) -> None:
+    lo, hi = [9, 1, 4, 13], [12, 3, 8, 13]
+    transform = shift(IndexTransform.from_shape((20,)).oindex[Intervals(lo, hi)])
+    expected = shift(IndexTransform.from_shape((20,)).oindex[r_(lo, hi)])
+    assert isinstance(transform.output[0], IntervalArrayMap)
+    grids = dimension_grids_from_chunks((4,), shape=(25,))
+    mapped = {}
+    for p in plan_chunks(transform, grids):
+        points = np.arange(p.chunk_transform.domain.shape[0]).reshape(-1, 1)
+        cells = p.cell_transform.apply_many(points)[:, 0]
+        storage = p.chunk_transform.apply_many(points)[:, 0] + p.chunk_domain.inclusive_min[0]
+        mapped.update(zip(cells.tolist(), storage.tolist(), strict=True))
+    lo_cell = expected.domain.inclusive_min[0]
+    cells = np.arange(lo_cell, expected.domain.exclusive_max[0]).reshape(-1, 1)
+    assert mapped == dict(
+        zip(cells[:, 0].tolist(), expected.apply_many(cells)[:, 0].tolist(), strict=True)
+    )

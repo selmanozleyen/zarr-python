@@ -436,6 +436,17 @@ output coordinate space. The canonical row selection has a one-dimensional
 request and a two-dimensional source, so its paired projections have request
 rank one and source rank two.
 
+### Runs of indices: `Intervals`
+
+`Intervals(lo, hi)` in `.oindex` selects the half-open runs `[lo[i], hi[i])` in
+order, what `np.r_[lo[0]:hi[0], ...]` selects, without listing every index. It
+is still an ordinary `ArrayMap`, stored as intervals, so it compares and
+serializes as the index list it equals; chunk planning reads the intervals:
+
+```python
+--8<-- "snippets/intervals.py:intervals"
+```
+
 ### Order and duplicates need the request-side projection
 
 Orthogonal indexing (`.oindex`) applies each axis's indexer
@@ -514,10 +525,12 @@ the second row on both of its transforms:
 --8<-- "snippets/grid_partition.py:strided-tables"
 ```
 
-There are three kinds of table, matching the three map kinds and the one
-arrangement that does not factor. A `StridedSet` holds a `ConstantMap` or
-`DimensionMap` axis; an `IndexedSet` holds an orthogonal `ArrayMap` axis
-(`.oindex`) with its coordinates grouped by chunk; and each `JointSet` holds one connected group of index arrays. Arrays
+There are three kinds of table, matching the three map kinds, plus one for
+intervals and one for the arrangement that does not factor. A `StridedSet`
+holds a `ConstantMap` or `DimensionMap` axis; an `IndexedSet` holds an
+orthogonal `ArrayMap` axis (`.oindex`) with its coordinates grouped by chunk;
+an `IntervalSet` holds an axis selected with `Intervals`, as the intervals
+split at chunk boundaries; and each `JointSet` holds one connected group of index arrays. Arrays
 sharing request axes are sorted together; independent groups are separate
 tables in `joint_sets`. Singleton broadcast axes retain this independence. The
 [API reference](../api/chunk_resolution.md) documents every column.

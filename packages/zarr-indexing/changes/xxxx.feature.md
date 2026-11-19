@@ -1,0 +1,1 @@
+Add `Intervals(lo, hi)`, an `.oindex` selector for runs of consecutive indices: it selects what `np.r_[lo[0]:hi[0], ...]` does, is stored as intervals inside an ordinary `ArrayMap`, and is planned per interval (`IntervalSet`) instead of per index.
