@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 
 from zarr_indexing._selector import as_scalar_index, is_bool_scalar, require_index
+from zarr_indexing.intervals import Intervals
 
 if TYPE_CHECKING:
     from zarr_indexing.domain import IndexDomain
@@ -364,6 +365,12 @@ def normalize_positional_selection(
         size = shape[axis]
         if arr is not None:
             result.append(_normalize_int_array(arr, size, axis) + origin[axis])
+        elif isinstance(sel, Intervals):
+            if mode != "orthogonal":
+                raise IndexError("Intervals select along one axis; use .oindex")
+            if sel.lo.size and (int(sel.lo.min()) < 0 or int(sel.hi.max()) > size):
+                raise IndexError(f"intervals out of bounds for axis {axis} with size {size}")
+            result.append(sel.shifted(origin[axis]))
         elif isinstance(sel, slice):
             start, stop, step = _normalize_slice(sel, size, axis)
             result.append(slice(start + origin[axis], stop + origin[axis], step))

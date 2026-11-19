@@ -40,6 +40,7 @@ from zarr_indexing._selector import as_scalar_index, require_index
 from zarr_indexing.boundary import validate_advanced_selection
 from zarr_indexing.domain import IndexDomain
 from zarr_indexing.errors import BoundsCheckError, VindexInvalidSelectionError
+from zarr_indexing.intervals import IntervalArrayMap, Intervals
 from zarr_indexing.output_map import (
     ArrayMap,
     ConstantMap,
@@ -132,9 +133,9 @@ class IndexTransform:
                 # JSON may use a lower-rank array that broadcasts against the
                 # domain; `from_json` widens those on the way in,
                 # so the invariant holds for every transform that exists.
-                if m.index_array.ndim != self.domain.ndim:
+                if len(m.shape) != self.domain.ndim:
                     raise ValueError(
-                        f"output[{i}].index_array has {m.index_array.ndim} dims "
+                        f"output[{i}].index_array has {len(m.shape)} dims "
                         f"but input domain has {self.domain.ndim} dims"
                     )
                 # Every axis is either the domain's extent or a singleton it
@@ -144,7 +145,7 @@ class IndexTransform:
                 bad = [
                     (axis, size, extent)
                     for axis, (size, extent) in enumerate(
-                        zip(m.index_array.shape, self.domain.shape, strict=True)
+                        zip(m.shape, self.domain.shape, strict=True)
                     )
                     if size not in (1, extent)
                 ]
@@ -153,7 +154,7 @@ class IndexTransform:
                     raise ValueError(
                         f"output[{i}].index_array has {size} entries on axis {axis}, "
                         f"which is neither 1 nor the domain's extent of {extent} "
-                        f"(index_array shape {m.index_array.shape}, "
+                        f"(index_array shape {m.shape}, "
                         f"domain shape {self.domain.shape})"
                     )
 
@@ -504,7 +505,7 @@ class IndexTransform:
                 maps.append(f"out[{i}] = {m.offset} + {m.stride} * in[{m.input_dimension}]")
             else:
                 # m: ArrayMap (OutputIndexMap = ConstantMap | DimensionMap | ArrayMap)
-                maps.append(f"out[{i}] = {m.offset} + {m.stride} * arr{m.index_array.shape}[in]")
+                maps.append(f"out[{i}] = {m.offset} + {m.stride} * arr{m.shape}[in]")
         maps_str = ", ".join(maps)
         return f"IndexTransform(domain={self.domain}, {maps_str})"
 
@@ -1605,11 +1606,23 @@ def _apply_oindex(transform: IndexTransform, selection: Any) -> IndexTransform:
     old_to_new_dim: dict[int, int] = {}
 
     # Info per old dim
-    dim_array: dict[int, np.ndarray[Any, np.dtype[np.intp]]] = {}
+    dim_array: dict[int, np.ndarray[Any, np.dtype[np.intp]] | Intervals] = {}
     dim_slice_params: dict[int, tuple[int, int, int]] = {}
 
     for old_dim, sel in enumerate(normalized):
-        if isinstance(sel, np.ndarray):
+        if isinstance(sel, Intervals):
+            lo = transform.domain.inclusive_min[old_dim]
+            hi = transform.domain.exclusive_max[old_dim]
+            if sel.lo.size and (int(sel.lo.min()) < lo or int(sel.hi.max()) > hi):
+                raise BoundsCheckError(
+                    f"intervals reach outside dimension {old_dim} (valid indices [{lo}, {hi}))"
+                )
+            dim_array[old_dim] = sel
+            new_inclusive_min.append(0)
+            new_exclusive_max.append(sel.size)
+            old_to_new_dim[old_dim] = new_dim_idx
+            new_dim_idx += 1
+        elif isinstance(sel, np.ndarray):
             lo = transform.domain.inclusive_min[old_dim]
             hi = transform.domain.exclusive_max[old_dim]
             # Index-array values are literal domain coordinates; the fancy dim
@@ -1650,7 +1663,15 @@ def _apply_oindex(transform: IndexTransform, selection: Any) -> IndexTransform:
                 # dependency axis is readable from the shape. A single-entry
                 # selection holds one coordinate and collapses to the
                 # ConstantMap it equals; its length-1 axis stays in the domain.
-                full_arr = _reshape_to_axis(dim_array[d], new_axis, new_dim_idx)
+                selected = dim_array[d]
+                if isinstance(selected, Intervals) and selected.size > 1:
+                    new_output.append(
+                        IntervalArrayMap(selected, new_axis, new_dim_idx, m.offset, m.stride)
+                    )
+                    continue
+                if isinstance(selected, Intervals):
+                    selected = selected.indices()
+                full_arr = _reshape_to_axis(selected, new_axis, new_dim_idx)
                 new_output.append(array_map_or_constant(full_arr, offset=m.offset, stride=m.stride))
             elif d in dim_slice_params:
                 start, step, origin = dim_slice_params[d]
@@ -1979,6 +2000,10 @@ def _validate_array_selection(selection: Any, shape: tuple[int, ...], mode: str)
                 )
             continue
         if sel is Ellipsis or as_scalar_index(sel) is not None:
+            continue
+        if isinstance(sel, Intervals):
+            if mode == "vectorized":
+                raise IndexError("Intervals select along one axis; use .oindex")
             continue
         if isinstance(sel, (list, np.ndarray)):
             if mode == "orthogonal":

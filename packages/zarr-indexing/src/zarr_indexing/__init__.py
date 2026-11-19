@@ -34,6 +34,7 @@ from zarr_indexing.chunk_resolution import (
     ChunkProjection,
     GridPartition,
     IndexedSet,
+    IntervalSet,
     JointSet,
     StridedSet,
     plan_chunks,
@@ -51,6 +52,7 @@ from zarr_indexing.grid import (
     VaryingDimension,
     dimension_grids_from_chunks,
 )
+from zarr_indexing.intervals import Intervals
 from zarr_indexing.json import (
     IndexDomainJSON,
     IndexTransformJSON,
@@ -103,6 +105,8 @@ __all__ = [
     "IndexTransform",
     "IndexTransformJSON",
     "IndexedSet",
+    "IntervalSet",
+    "Intervals",
     "JointSet",
     "LazyArray",
     "NdselError",
