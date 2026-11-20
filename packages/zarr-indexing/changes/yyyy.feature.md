@@ -1,0 +1,1 @@
+Add `Intervals(lo, hi)`, an `.oindex` selector for runs of consecutive indices. It selects what `np.r_[lo[0]:hi[0], ...]` does and stores the intervals, not every index, so a selection stays small, also when pickled.
