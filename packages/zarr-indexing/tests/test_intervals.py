@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import pickle
 from typing import Any
 
@@ -121,17 +122,18 @@ def test_planning_and_reading_never_build_the_index_array(
         .oindex[Intervals([30, 2, 10], [34, 8, 15]), :]
     )
     assert isinstance(view.transform.output[0], IntervalArrayMap)
-    expected = source[r_([30, 2, 10], [34, 8, 15])]
-    real_indices = Intervals.indices
 
     def indices(self: Intervals) -> np.ndarray[Any, Any]:
-        # Splitting a chunk into several pieces lists that chunk's indices; the
-        # whole selection is never listed.
-        assert self.size < expected.shape[0], "built the full index array"
-        return real_indices(self)
+        raise AssertionError("built the full index array")
 
     monkeypatch.setattr(Intervals, "indices", indices)
-    np.testing.assert_array_equal(view.result(), expected)
+    np.testing.assert_array_equal(view.result(), source[r_([30, 2, 10], [34, 8, 15])])
+
+
+def test_out_of_grid_error_names_the_coordinate() -> None:
+    transform = IndexTransform.from_shape((20,)).oindex[Intervals([1, 9], [4, 12])].translate((15,))
+    with pytest.raises(IndexError, match="index 26 is out of bounds"):
+        list(plan_chunks(transform, dimension_grids_from_chunks((4,), shape=(25,))))
 
 
 def test_plan_of_huge_intervals_is_per_interval() -> None:
@@ -166,7 +168,7 @@ def test_intervals_cannot_change_after_selecting() -> None:
         selector.hi[1] = 10
     with pytest.raises(ValueError, match="WRITEABLE"):
         selector.hi.flags.writeable = True
-    with pytest.raises(AttributeError, match="immutable"):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         selector.hi = np.array([4, 10])
     assert transform == IndexTransform.from_shape((20,)).oindex[r_([1, 9], [4, 12])]
 

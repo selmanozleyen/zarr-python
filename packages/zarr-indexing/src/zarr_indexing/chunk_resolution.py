@@ -49,7 +49,7 @@ import numpy as np
 
 from zarr_indexing._affine import checked_affine
 from zarr_indexing.domain import IndexDomain
-from zarr_indexing.intervals import IntervalArrayMap, _ranges
+from zarr_indexing.intervals import IntervalArrayMap, concat_ranges
 from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap, OutputIndexMap
 from zarr_indexing.transform import (
     IndexTransform,
@@ -798,6 +798,9 @@ def _interval_set(out_dim: int, m: IntervalArrayMap, dg: DimensionGridLike) -> I
     starts = checked_affine(m.offset, 1, m.intervals.lo)
     stops = starts + lengths
     position = np.cumsum(lengths) - lengths
+    # As in `_indexed_set`: the scalar lookup's error names the coordinate.
+    dg.index_to_chunk(int(starts.min()))
+    dg.index_to_chunk(int((stops - 1).max()))
     first = dg.indices_to_chunks(starts)
     count = dg.indices_to_chunks(stops - 1) - first + 1
     # One piece per (interval, chunk it crosses), in request order.
@@ -972,38 +975,27 @@ def _interval_piece(axis: IntervalSet, row: int, rank: int, origin: int) -> _Axi
     """One row of an interval table: a slice when the chunk holds one piece, else index arrays."""
     run = axis.run(row)
     k = axis.input_dimension
-    c_start = int(axis.chunk_start[row])
     c_extent = int(axis.chunk_extent[row])
     local, extent, position = axis.local_start[run], axis.extent[run], axis.origin[run]
     count = int(extent.sum())
+    chunk_map: OutputIndexMap
+    cell_map: OutputIndexMap
     if local.size == 1:
         start = int(local[0])
-        return (
-            int(axis.chunk[row]),
-            c_start,
-            c_extent,
-            k,
-            count,
-            DimensionMap(input_dimension=k, offset=start),
-            DimensionMap(input_dimension=k, offset=origin + int(position[0])),
-            start == 0 and count == c_extent,
+        chunk_map = DimensionMap(input_dimension=k, offset=start)
+        cell_map = DimensionMap(input_dimension=k, offset=origin + int(position[0]))
+        full = start == 0 and count == c_extent
+    else:
+        # Several pieces become index arrays, so coverage is "unknown" even when
+        # they tile the chunk, as for `IndexedSet` rows.
+        shape = (1,) * k + (count,) + (1,) * (rank - k - 1)
+        chunk_map = ArrayMap(index_array=concat_ranges(local, local + extent).reshape(shape))
+        cell_map = ArrayMap(
+            index_array=concat_ranges(position, position + extent).reshape(shape), offset=origin
         )
-    # Several pieces become index arrays, so coverage is "unknown" even when they
-    # tile the chunk, as for `IndexedSet` rows.
-    shape = (1,) * k + (count,) + (1,) * (rank - k - 1)
-    return (
-        int(axis.chunk[row]),
-        c_start,
-        c_extent,
-        k,
-        count,
-        ArrayMap(index_array=_ranges(local, local + extent).reshape(shape)),
-        ArrayMap(
-            index_array=_ranges(position, position + extent).reshape(shape),
-            offset=origin,
-        ),
-        False,
-    )
+        full = False
+    chunk = int(axis.chunk[row])
+    return (chunk, int(axis.chunk_start[row]), c_extent, k, count, chunk_map, cell_map, full)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1087,8 +1079,8 @@ class GridPartition:
             )
             return _strided_piece(axis, row, origin)
         if isinstance(axis, IntervalSet):
-            k = axis.input_dimension
-            return _interval_piece(axis, row, domain.ndim, domain.inclusive_min[k])
+            origin = domain.inclusive_min[axis.input_dimension]
+            return _interval_piece(axis, row, domain.ndim, origin)
         return _indexed_piece(axis, row, domain.ndim, domain.inclusive_min[axis.input_dimension])
 
     def _unbound(self) -> tuple[list[OutputIndexMap | None], bool]:

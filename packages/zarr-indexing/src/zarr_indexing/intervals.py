@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -15,6 +16,7 @@ if TYPE_CHECKING:
 __all__ = ["Intervals"]
 
 
+@dataclass(frozen=True, slots=True, eq=False)
 class Intervals:
     """Half-open intervals `[lo[i], hi[i])` along one axis, read in order.
 
@@ -31,8 +33,6 @@ class Intervals:
     >>> view.oindex[Intervals(lo=[7, 1], hi=[9, 3])].result()
     array([70, 80, 10, 20])
     """
-
-    __slots__ = ("hi", "lo", "size")
 
     lo: npt.NDArray[np.intp]
     """First index of each non-empty interval."""
@@ -54,8 +54,8 @@ class Intervals:
             if array.size and not np.issubdtype(array.dtype, np.integer):
                 raise TypeError(f"{name} must have an integer dtype, got {array.dtype}")
         lo_array, hi_array = checked_affine(0, 1, lo_array), checked_affine(0, 1, hi_array)
-        # Exact Python integers: `hi - lo` and its sum can overflow np.intp.
-        # ponytail: ~50 ms per 1e6 intervals; add an intp fast path if that shows up.
+        # Exact Python integers, as `hi - lo` and its sum can overflow np.intp
+        # (about 50 ms per million intervals).
         lengths = hi_array.astype(object) - lo_array.astype(object)
         if (lengths < 0).any():
             raise ValueError("every interval needs lo <= hi")
@@ -70,16 +70,11 @@ class Intervals:
         object.__setattr__(self, "hi", hi)
         object.__setattr__(self, "size", size)
 
-    def __setattr__(self, name: str, value: object) -> None:
-        raise AttributeError("Intervals is immutable")
-
     def __repr__(self) -> str:
         return f"Intervals(lo={self.lo.tolist()}, hi={self.hi.tolist()})"
 
     def shifted(self, offset: int) -> Intervals:
         """The same intervals moved by `offset`."""
-        if offset == 0:
-            return self
         moved = object.__new__(Intervals)
         moved._init(
             _read_only(checked_affine(offset, 1, self.lo)),
@@ -90,10 +85,10 @@ class Intervals:
 
     def indices(self) -> npt.NDArray[np.intp]:
         """Every selected index, in order: `np.r_[lo[0]:hi[0], lo[1]:hi[1], ...]`."""
-        return _ranges(self.lo, self.hi)
+        return concat_ranges(self.lo, self.hi)
 
 
-def _ranges(lo: npt.NDArray[np.intp], hi: npt.NDArray[np.intp]) -> npt.NDArray[np.intp]:
+def concat_ranges(lo: npt.NDArray[np.intp], hi: npt.NDArray[np.intp]) -> npt.NDArray[np.intp]:
     """`np.r_[lo[0]:hi[0], lo[1]:hi[1], ...]` for `lo <= hi`."""
     lengths = hi - lo
     starts = np.repeat(lo - (np.cumsum(lengths) - lengths), lengths)
@@ -127,7 +122,7 @@ class IntervalArrayMap(ArrayMap):
     _index_array: npt.NDArray[np.intp] | None
 
     def __init__(
-        self, intervals: Intervals, axis: int, ndim: int, offset: int = 0, stride: int = 1
+        self, intervals: Intervals, axis: int, ndim: int, offset: int, stride: int
     ) -> None:
         shape = (1,) * axis + (intervals.size,) + (1,) * (ndim - axis - 1)
         object.__setattr__(self, "intervals", intervals)
@@ -152,8 +147,9 @@ class IntervalArrayMap(ArrayMap):
 
     def _with_affine(self, offset: int, stride: int) -> ArrayMap:
         """The same intervals under a different affine adjustment, still stored as intervals."""
-        axis = self._shape.index(self.intervals.size)
-        return IntervalArrayMap(self.intervals, axis, len(self._shape), offset, stride)
+        return IntervalArrayMap(
+            self.intervals, self.dependency_axes[0], len(self._shape), offset, stride
+        )
 
     def __reduce__(self) -> tuple[object, tuple[object, int, int]]:
         """Pickle as the plain `ArrayMap` it equals."""
