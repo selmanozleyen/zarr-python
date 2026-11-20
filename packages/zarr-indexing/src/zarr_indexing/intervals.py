@@ -120,7 +120,7 @@ class IntervalArrayMap(ArrayMap):
 
     It is the same map as the `ArrayMap` of `intervals.indices()`: it compares,
     serializes and composes as that map, and builds the index array the first
-    time an operation asks for it. Pickling uses the intervals.
+    time an operation asks for it. Chunk planning and pickling use the intervals.
     """
 
     __slots__ = ("_index_array", "_shape", "intervals")

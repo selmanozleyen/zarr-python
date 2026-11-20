@@ -23,6 +23,8 @@ so each axis is resolved once against its grid into a table:
   the first cell, and whether the row covers its chunk exactly once.
 - `IndexedSet` — an orthogonal `ArrayMap` axis: its coordinates grouped by
   chunk in CSR form, with the request positions they fill.
+- `IntervalSet` — an `ArrayMap` built from `Intervals`: the intervals split at
+  chunk boundaries, in O(intervals + pieces) rather than per index.
 - `JointSet` — one connected index-array component. Arrays sharing input
   axes are grouped together; independent components remain separate tables.
 
@@ -47,6 +49,7 @@ import numpy as np
 
 from zarr_indexing._affine import checked_affine
 from zarr_indexing.domain import IndexDomain
+from zarr_indexing.intervals import IntervalArrayMap, concat_ranges
 from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap, OutputIndexMap
 from zarr_indexing.transform import (
     IndexTransform,
@@ -457,6 +460,77 @@ class IndexedSet:
 
 
 @dataclass(frozen=True, slots=True)
+class IntervalSet:
+    """One output dimension read through `Intervals`, one row per chunk.
+
+    Each interval is split at chunk boundaries into pieces, grouped by chunk in
+    CSR form: row ``i`` owns pieces ``pointer[i]:pointer[i + 1]``, in request
+    order. Piece ``j`` is ``extent[j]`` consecutive chunk-local coordinates from
+    ``local_start[j]``, filling request positions from ``origin[j]``, counted
+    from the request axis's lower bound. Pieces that continue each other in
+    storage and in the request are merged. No column has an entry per index.
+
+    Examples
+    --------
+    >>> from zarr_indexing import IndexTransform, Intervals, plan_chunks
+    >>> from zarr_indexing.grid import dimension_grids_from_chunks
+    >>> grids = dimension_grids_from_chunks((4,), shape=(10,))
+    >>> transform = IndexTransform.from_shape((10,)).oindex[Intervals(lo=[6, 1], hi=[9, 3])]
+    >>> (axis,) = plan_chunks(transform, grids).partition().sets
+    >>> axis.chunk.tolist(), axis.pointer.tolist()
+    ([0, 1, 2], [0, 1, 2, 3])
+    >>> axis.local_start.tolist(), axis.extent.tolist(), axis.origin.tolist()
+    ([1, 2, 0], [2, 2, 1], [3, 0, 2])
+    """
+
+    output_dimension: int
+    """The storage axis this table describes."""
+
+    input_dimension: int
+    """The request axis the intervals are laid along."""
+
+    chunk: np.ndarray[Any, np.dtype[np.intp]]
+    """Chunk index along the axis, one per row, ascending."""
+
+    chunk_start: np.ndarray[Any, np.dtype[np.intp]]
+    """Storage origin of each chunk."""
+
+    chunk_extent: np.ndarray[Any, np.dtype[np.intp]]
+    """Data extent of each chunk."""
+
+    pointer: np.ndarray[Any, np.dtype[np.intp]]
+    """CSR row pointer: row ``i`` owns pieces ``pointer[i]`` to ``pointer[i + 1]``."""
+
+    local_start: np.ndarray[Any, np.dtype[np.intp]]
+    """Chunk-local storage coordinate of each piece's first cell."""
+
+    extent: np.ndarray[Any, np.dtype[np.intp]]
+    """Cells in each piece."""
+
+    origin: np.ndarray[Any, np.dtype[np.intp]]
+    """Request position of each piece's first cell."""
+
+    def __post_init__(self) -> None:
+        _own_columns(
+            self,
+            "chunk",
+            "chunk_start",
+            "chunk_extent",
+            "pointer",
+            "local_start",
+            "extent",
+            "origin",
+        )
+
+    def __len__(self) -> int:
+        return int(self.chunk.size)
+
+    def run(self, row: int) -> slice:
+        """The slice of the piece columns a row owns."""
+        return slice(int(self.pointer[row]), int(self.pointer[row + 1]))
+
+
+@dataclass(frozen=True, slots=True)
 class JointSet:
     """One connected component of index arrays, grouped by the chunk each point lands in.
 
@@ -719,6 +793,50 @@ def _group_by_key(
     return np.asarray(order, dtype=np.intp)
 
 
+def _interval_set(out_dim: int, m: IntervalArrayMap, dg: DimensionGridLike) -> IntervalSet:
+    lengths = m.intervals.hi - m.intervals.lo
+    starts = checked_affine(m.offset, 1, m.intervals.lo)
+    stops = checked_affine(m.offset, 1, m.intervals.hi)
+    position = np.cumsum(lengths) - lengths
+    # As in `_indexed_set`: the scalar lookup's error names the coordinate.
+    dg.index_to_chunk(int(starts.min()))
+    dg.index_to_chunk(int((stops - 1).max()))
+    first = dg.indices_to_chunks(starts)
+    count = dg.indices_to_chunks(stops - 1) - first + 1
+    # One piece per (interval, chunk it crosses), in request order.
+    interval = np.repeat(np.arange(starts.size, dtype=np.intp), count)
+    step = np.arange(interval.size, dtype=np.intp) - np.repeat(np.cumsum(count) - count, count)
+    unique, inverse = np.unique(np.repeat(first, count) + step, return_inverse=True)
+    unique_start, unique_extent = _chunk_bounds(dg, np.asarray(unique, dtype=np.intp))
+    c_start = unique_start[inverse]
+    lo = np.maximum(starts[interval], c_start)
+    hi = np.minimum(stops[interval], c_start + unique_extent[inverse])
+    order = np.argsort(inverse, kind="stable")
+    row = inverse[order]
+    local = (lo - c_start)[order]
+    extent = (hi - lo)[order]
+    piece_origin = (position[interval] + lo - starts[interval])[order]
+    # Pieces that continue each other in storage and in the request merge.
+    continues = (
+        (row[1:] == row[:-1])
+        & (local[1:] == local[:-1] + extent[:-1])
+        & (piece_origin[1:] == piece_origin[:-1] + extent[:-1])
+    )
+    head = np.flatnonzero(np.concatenate([[True], ~continues]))
+    rows, counts = np.unique(row[head], return_counts=True)
+    return IntervalSet(
+        output_dimension=out_dim,
+        input_dimension=m.dependency_axes[0],
+        chunk=np.asarray(unique[rows], dtype=np.intp),
+        chunk_start=unique_start[rows],
+        chunk_extent=unique_extent[rows],
+        pointer=np.concatenate([[0], np.cumsum(counts)]).astype(np.intp),
+        local_start=local[head],
+        extent=np.add.reduceat(extent, head),
+        origin=piece_origin[head],
+    )
+
+
 def _chunk_keys(
     chunk_ids: Sequence[np.ndarray[Any, np.dtype[np.intp]]],
 ) -> np.ndarray[Any, np.dtype[np.intp]]:
@@ -853,12 +971,38 @@ def _indexed_piece(axis: IndexedSet, row: int, rank: int, origin: int) -> _AxisP
     )
 
 
+def _interval_piece(axis: IntervalSet, row: int, rank: int, origin: int) -> _AxisPiece:
+    """One row of an interval table: a slice when the chunk holds one piece, else index arrays."""
+    run = axis.run(row)
+    k = axis.input_dimension
+    c_extent = int(axis.chunk_extent[row])
+    local, extent, position = axis.local_start[run], axis.extent[run], axis.origin[run]
+    count = int(extent.sum())
+    chunk_map: OutputIndexMap
+    cell_map: OutputIndexMap
+    if local.size == 1:
+        chunk_map = DimensionMap(input_dimension=k, offset=int(local[0]))
+        cell_map = DimensionMap(input_dimension=k, offset=origin + int(position[0]))
+        full = count == c_extent
+    else:
+        # Several pieces become index arrays, so coverage is "unknown" even when
+        # they tile the chunk, as for `IndexedSet` rows.
+        shape = (1,) * k + (count,) + (1,) * (rank - k - 1)
+        chunk_map = ArrayMap(index_array=concat_ranges(local, local + extent).reshape(shape))
+        cell_map = ArrayMap(
+            index_array=concat_ranges(position, position + extent).reshape(shape), offset=origin
+        )
+        full = False
+    chunk = int(axis.chunk[row])
+    return (chunk, int(axis.chunk_start[row]), c_extent, k, count, chunk_map, cell_map, full)
+
+
 @dataclass(frozen=True, slots=True)
 class GridPartition:
     """A plan in factored form: per-axis tables whose product is the chunk walk.
 
-    `sets` holds one `StridedSet` or `IndexedSet` per output dimension the
-    transform reads independently, in output-dimension order; `joint_sets`
+    `sets` holds one `StridedSet`, `IndexedSet` or `IntervalSet` per output
+    dimension the transform reads independently, in output-dimension order; `joint_sets`
     holds the connected index-array components. A projection is one row of each
     table, so the partition has ``prod(row_shape)`` rows, walked
     in row-major order over `row_shape` (the component tables after `sets`). Rows are materialized into
@@ -890,7 +1034,7 @@ class GridPartition:
     dimension_grids: tuple[DimensionGridLike, ...]
     """One grid per storage dimension."""
 
-    sets: tuple[StridedSet | IndexedSet, ...]
+    sets: tuple[StridedSet | IndexedSet | IntervalSet, ...]
     """Independent per-axis tables, in output-dimension order."""
 
     joint_sets: tuple[JointSet, ...]
@@ -926,13 +1070,17 @@ class GridPartition:
 
     # -- factorized assembly ------------------------------------------------
 
-    def _pieces(self, axis: StridedSet | IndexedSet, row: int) -> _AxisPiece:
+    def _pieces(self, axis: StridedSet | IndexedSet | IntervalSet, row: int) -> _AxisPiece:
         domain = self.transform.domain
         if isinstance(axis, StridedSet):
             origin = (
                 0 if axis.input_dimension is None else domain.inclusive_min[axis.input_dimension]
             )
             return _strided_piece(axis, row, origin)
+        if isinstance(axis, IntervalSet):
+            return _interval_piece(
+                axis, row, domain.ndim, domain.inclusive_min[axis.input_dimension]
+            )
         return _indexed_piece(axis, row, domain.ndim, domain.inclusive_min[axis.input_dimension])
 
     def _unbound(self) -> tuple[list[OutputIndexMap | None], bool]:
@@ -1194,12 +1342,15 @@ def _partition_transform(
             transform=transform, dimension_grids=grids, sets=(), joint_sets=(), row_shape=(0,)
         )
     correlated = transform.index_array_structure == "general"
-    sets: list[StridedSet | IndexedSet] = []
+    sets: list[StridedSet | IndexedSet | IntervalSet] = []
     for out_dim, m in enumerate(transform.output):
         if isinstance(m, ArrayMap):
             if correlated:
                 continue
-            sets.append(_indexed_set(out_dim, m, grids[out_dim]))
+            if isinstance(m, IntervalArrayMap) and m.stride == 1:
+                sets.append(_interval_set(out_dim, m, grids[out_dim]))
+            else:
+                sets.append(_indexed_set(out_dim, m, grids[out_dim]))
         else:
             sets.append(_strided_set(transform, out_dim, m, grids[out_dim]))
     joint_sets = _component_joint_sets(transform, grids) if correlated else ()

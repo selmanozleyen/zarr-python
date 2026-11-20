@@ -28,7 +28,7 @@ and the wire format built on top of it.
   and `ArrayMap`: three coordinate mappings that preserve order and duplicates,
   one per storage dimension
 - [`zarr_indexing.intervals`](intervals.md) — `Intervals`, the `.oindex` selector for runs
-  of consecutive indices, stored as intervals
+  of consecutive indices, stored and planned as intervals
 - [`zarr_indexing.transform`](transform.md) — `IndexTransform`, which pairs a
   domain with output maps, plus the indexing (`[...]`, `.oindex`, `.vindex`),
   `intersect`, `translate`, and `compose` operations, and `selection_to_transform`

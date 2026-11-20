@@ -20,7 +20,7 @@ backends use an explicit `Reader` adapter.
 `plan_chunks` projects a transform through a caller-selected chunk grid without
 coupling the result to a storage backend or scheduler; `ChunkPlan.partition`
 exposes the plan's factored, columnar form as a `GridPartition` of
-`StridedSet`, `IndexedSet` and `JointSet` tables. Consumers starting from a
+`StridedSet`, `IndexedSet`, `IntervalSet` and `JointSet` tables. Consumers starting from a
 NumPy-style selection translate it with `zarr_indexing.boundary`. The
 `DimensionGridLike` Protocol describes the narrow grid surface chunk resolution
 consumes without importing zarr.
@@ -34,6 +34,7 @@ from zarr_indexing.chunk_resolution import (
     ChunkProjection,
     GridPartition,
     IndexedSet,
+    IntervalSet,
     JointSet,
     StridedSet,
     plan_chunks,
@@ -104,6 +105,7 @@ __all__ = [
     "IndexTransform",
     "IndexTransformJSON",
     "IndexedSet",
+    "IntervalSet",
     "Intervals",
     "JointSet",
     "LazyArray",
