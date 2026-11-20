@@ -526,8 +526,8 @@ the second row on both of its transforms:
 --8<-- "snippets/grid_partition.py:strided-tables"
 ```
 
-There are three kinds of table, matching the three map kinds, plus one for
-intervals and one for the arrangement that does not factor. A `StridedSet`
+There are four kinds of table: one per map kind, one for intervals, and one
+for the arrangement that does not factor. A `StridedSet`
 holds a `ConstantMap` or `DimensionMap` axis; an `IndexedSet` holds an
 orthogonal `ArrayMap` axis (`.oindex`) with its coordinates grouped by chunk;
 an `IntervalSet` holds an axis selected with `Intervals`, as the intervals

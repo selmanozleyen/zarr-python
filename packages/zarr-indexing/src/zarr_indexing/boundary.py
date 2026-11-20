@@ -370,8 +370,7 @@ def normalize_positional_selection(
         elif isinstance(sel, Intervals):
             if mode != "orthogonal":
                 raise IndexError("Intervals select along one axis; use .oindex")
-            span = sel.span()
-            if span is not None and (span[0] < 0 or span[1] > size):
+            if sel.size and (int(sel.lo.min()) < 0 or int(sel.hi.max()) > size):
                 raise IndexError(f"intervals out of bounds for axis {axis} with size {size}")
             result.append(sel.shifted(origin[axis]))
         elif isinstance(sel, slice):

@@ -2,4 +2,4 @@
 title: intervals
 ---
 
-::: zarr_indexing.intervals
+::: zarr_indexing.intervals.Intervals

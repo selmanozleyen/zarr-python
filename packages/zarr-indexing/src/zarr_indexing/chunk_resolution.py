@@ -49,7 +49,7 @@ import numpy as np
 
 from zarr_indexing._affine import checked_affine
 from zarr_indexing.domain import IndexDomain
-from zarr_indexing.intervals import IntervalArrayMap, Intervals
+from zarr_indexing.intervals import IntervalArrayMap, _ranges
 from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap, OutputIndexMap
 from zarr_indexing.transform import (
     IndexTransform,
@@ -795,10 +795,9 @@ def _group_by_key(
 
 def _interval_set(out_dim: int, m: IntervalArrayMap, dg: DimensionGridLike) -> IntervalSet:
     lengths = m.intervals.hi - m.intervals.lo
-    keep = lengths > 0
-    starts = checked_affine(m.offset, 1, m.intervals.lo[keep])
-    stops = starts + lengths[keep]
-    position = (np.cumsum(lengths) - lengths)[keep]
+    starts = checked_affine(m.offset, 1, m.intervals.lo)
+    stops = starts + lengths
+    position = np.cumsum(lengths) - lengths
     first = dg.indices_to_chunks(starts)
     count = dg.indices_to_chunks(stops - 1) - first + 1
     # One piece per (interval, chunk it crosses), in request order.
@@ -989,8 +988,8 @@ def _interval_piece(axis: IntervalSet, row: int, rank: int, origin: int) -> _Axi
             DimensionMap(input_dimension=k, offset=origin + int(position[0])),
             start == 0 and count == c_extent,
         )
-    # Several pieces are reported as partial coverage even when they tile the
-    # chunk, as `IndexedSet` rows are.
+    # Several pieces become index arrays, so coverage is "unknown" even when they
+    # tile the chunk, as for `IndexedSet` rows.
     shape = (1,) * k + (count,) + (1,) * (rank - k - 1)
     return (
         int(axis.chunk[row]),
@@ -998,9 +997,9 @@ def _interval_piece(axis: IntervalSet, row: int, rank: int, origin: int) -> _Axi
         c_extent,
         k,
         count,
-        ArrayMap(index_array=Intervals(local, local + extent).indices().reshape(shape)),
+        ArrayMap(index_array=_ranges(local, local + extent).reshape(shape)),
         ArrayMap(
-            index_array=Intervals(position, position + extent).indices().reshape(shape),
+            index_array=_ranges(position, position + extent).reshape(shape),
             offset=origin,
         ),
         False,

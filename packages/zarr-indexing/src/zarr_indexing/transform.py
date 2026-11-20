@@ -1540,8 +1540,8 @@ class _OIndexHelper:
 
 def _normalize_oindex_selection(
     selection: Any, ndim: int
-) -> tuple[np.ndarray[Any, np.dtype[np.intp]] | slice, ...]:
-    """Normalize an oindex selection: arrays, slices, booleans, integers."""
+) -> tuple[np.ndarray[Any, np.dtype[np.intp]] | Intervals | slice, ...]:
+    """Normalize an oindex selection: arrays, slices, booleans, integers, `Intervals`."""
     if not isinstance(selection, tuple):
         selection = (selection,)
 
@@ -1610,33 +1610,22 @@ def _apply_oindex(transform: IndexTransform, selection: Any) -> IndexTransform:
     dim_slice_params: dict[int, tuple[int, int, int]] = {}
 
     for old_dim, sel in enumerate(normalized):
-        if isinstance(sel, Intervals):
+        if isinstance(sel, (np.ndarray, Intervals)):
             lo = transform.domain.inclusive_min[old_dim]
             hi = transform.domain.exclusive_max[old_dim]
-            span = sel.span()
-            if span is not None and (span[0] < lo or span[1] > hi):
-                raise BoundsCheckError(
-                    f"intervals reach outside dimension {old_dim} (valid indices [{lo}, {hi}))"
-                )
+            # Index-array values are literal domain coordinates; the fancy dim
+            # they create gets a fresh zero-origin [0, n) domain (TensorStore).
+            # Intervals are non-empty, so their ends bound the indices.
+            ends = np.concatenate([sel.lo, sel.hi - 1]) if isinstance(sel, Intervals) else sel
+            _check_array_in_bounds(ends, lo, hi)
             dim_array[old_dim] = sel
             new_inclusive_min.append(0)
             new_exclusive_max.append(sel.size)
             old_to_new_dim[old_dim] = new_dim_idx
             new_dim_idx += 1
-        elif isinstance(sel, np.ndarray):
-            lo = transform.domain.inclusive_min[old_dim]
-            hi = transform.domain.exclusive_max[old_dim]
-            # Index-array values are literal domain coordinates; the fancy dim
-            # they create gets a fresh zero-origin [0, n) domain (TensorStore).
-            _check_array_in_bounds(sel, lo, hi)
-            dim_array[old_dim] = sel
-            new_inclusive_min.append(0)
-            new_exclusive_max.append(len(sel))
-            old_to_new_dim[old_dim] = new_dim_idx
-            new_dim_idx += 1
         else:
             # sel: slice (_normalize_oindex_selection returns
-            # tuple[np.ndarray | slice, ...])
+            # tuple[np.ndarray | Intervals | slice, ...])
             lo = transform.domain.inclusive_min[old_dim]
             hi = transform.domain.exclusive_max[old_dim]
             start, step, origin, size = _resolve_slice_ts(sel, old_dim, lo, hi)
@@ -1665,11 +1654,12 @@ def _apply_oindex(transform: IndexTransform, selection: Any) -> IndexTransform:
                 # selection holds one coordinate and collapses to the
                 # ConstantMap it equals; its length-1 axis stays in the domain.
                 selected = dim_array[d]
-                if isinstance(selected, Intervals) and selected.size > 1:
-                    shape = (1,) * new_axis + (selected.size,) + (1,) * (new_dim_idx - new_axis - 1)
-                    new_output.append(IntervalArrayMap(selected, shape, m.offset, m.stride))
-                    continue
                 if isinstance(selected, Intervals):
+                    if selected.size > 1:
+                        new_output.append(
+                            IntervalArrayMap(selected, new_axis, new_dim_idx, m.offset, m.stride)
+                        )
+                        continue
                     selected = selected.indices()
                 full_arr = _reshape_to_axis(selected, new_axis, new_dim_idx)
                 new_output.append(array_map_or_constant(full_arr, offset=m.offset, stride=m.stride))
