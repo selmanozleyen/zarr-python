@@ -1613,7 +1613,8 @@ def _apply_oindex(transform: IndexTransform, selection: Any) -> IndexTransform:
         if isinstance(sel, Intervals):
             lo = transform.domain.inclusive_min[old_dim]
             hi = transform.domain.exclusive_max[old_dim]
-            if sel.lo.size and (int(sel.lo.min()) < lo or int(sel.hi.max()) > hi):
+            span = sel.span()
+            if span is not None and (span[0] < lo or span[1] > hi):
                 raise BoundsCheckError(
                     f"intervals reach outside dimension {old_dim} (valid indices [{lo}, {hi}))"
                 )
@@ -1665,9 +1666,8 @@ def _apply_oindex(transform: IndexTransform, selection: Any) -> IndexTransform:
                 # ConstantMap it equals; its length-1 axis stays in the domain.
                 selected = dim_array[d]
                 if isinstance(selected, Intervals) and selected.size > 1:
-                    new_output.append(
-                        IntervalArrayMap(selected, new_axis, new_dim_idx, m.offset, m.stride)
-                    )
+                    shape = (1,) * new_axis + (selected.size,) + (1,) * (new_dim_idx - new_axis - 1)
+                    new_output.append(IntervalArrayMap(selected, shape, m.offset, m.stride))
                     continue
                 if isinstance(selected, Intervals):
                     selected = selected.indices()
@@ -2002,8 +2002,6 @@ def _validate_array_selection(selection: Any, shape: tuple[int, ...], mode: str)
         if sel is Ellipsis or as_scalar_index(sel) is not None:
             continue
         if isinstance(sel, Intervals):
-            if mode == "vectorized":
-                raise IndexError("Intervals select along one axis; use .oindex")
             continue
         if isinstance(sel, (list, np.ndarray)):
             if mode == "orthogonal":

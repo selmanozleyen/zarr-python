@@ -439,9 +439,10 @@ rank one and source rank two.
 ### Runs of indices: `Intervals`
 
 `Intervals(lo, hi)` in `.oindex` selects the half-open runs `[lo[i], hi[i])` in
-order, what `np.r_[lo[0]:hi[0], ...]` selects, without listing every index. It
-is still an ordinary `ArrayMap`, stored as intervals, so it compares and
-serializes as the index list it equals; chunk planning reads the intervals:
+order, what `np.r_[lo[0]:hi[0], ...]` selects, without listing every index.
+Chunk planning reads the intervals directly. Anything else that needs the
+indices builds the full list: comparing, hashing, serializing, and a further
+selection on the view:
 
 ```python
 --8<-- "snippets/intervals.py:intervals"

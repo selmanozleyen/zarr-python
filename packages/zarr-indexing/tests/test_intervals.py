@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import pickle
 from typing import Any
 
@@ -43,6 +44,8 @@ def test_indices_are_np_r() -> None:
         ([[0]], [[1]], ValueError),
         ([3], [2], ValueError),
         ([0.5], [1], TypeError),
+        (np.array([0], np.uint64), np.array([2**63 + 5], np.uint64), OverflowError),
+        ([0, 0], [2**62, 2**62], OverflowError),
     ],
 )
 def test_validation(lo: Any, hi: Any, error: type[Exception]) -> None:
@@ -64,12 +67,36 @@ def cases(
         [e * (offset + 1) if j == 0 else e for j, e in enumerate(extents)]
     )
     view_values = source[offset : offset + extents[0]]
-    lo = draw(st.lists(st.integers(0, extents[axis]), max_size=6))
-    hi = [draw(st.integers(a, extents[axis])) for a in lo]
+
+    def intervals(extent: int) -> tuple[Intervals, np.ndarray[Any, Any]]:
+        lo = draw(st.lists(st.integers(0, extent), max_size=6))
+        hi = [draw(st.integers(a, extent)) for a in lo]
+        return Intervals(lo, hi), r_(lo, hi)
+
+    key: list[Any] = []
+    takes: list[Any] = []
+    for j in range(rank):
+        kind = (
+            "intervals"
+            if j == axis
+            else draw(st.sampled_from(["slice", "int", "list", "intervals"]))
+        )
+        if kind == "intervals":
+            entry, take = intervals(extents[j])
+        elif kind == "int":
+            entry = take = draw(st.integers(0, extents[j] - 1))
+        elif kind == "list":
+            entry = take = draw(st.lists(st.integers(0, extents[j] - 1), min_size=1, max_size=4))
+        else:
+            entry, take = slice(None), np.arange(extents[j])
+        key.append(entry)
+        takes.append(take)
+    expected = view_values
+    for j in reversed(range(rank)):  # last axis first, so a dropped axis shifts none still to come
+        expected = np.take(expected, takes[j], axis=j)
     parts = tuple(draw(st.integers(1, n)) for n in source.shape)
     view = LazyArray.from_numpy(source).with_parts(parts)[offset : offset + extents[0]]
-    key = tuple(Intervals(lo, hi) if j == axis else slice(None) for j in range(rank))
-    return view, view_values, key, np.take(view_values, r_(lo, hi), axis=axis)
+    return view, view_values, tuple(key), expected
 
 
 @settings(deadline=None)
@@ -81,17 +108,27 @@ def test_matches_numpy(case: Any) -> None:
     np.testing.assert_array_equal(selected.unpartitioned().result(), expected)
 
 
-def test_planning_and_reading_never_build_the_index_array() -> None:
+def test_planning_and_reading_never_build_the_index_array(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source = np.arange(40 * 3).reshape(40, 3)
     view = (
         LazyArray.from_numpy(source)
         .with_parts((8, 3))
         .oindex[Intervals([30, 2, 10], [34, 8, 15]), :]
     )
-    m = view.transform.output[0]
-    assert isinstance(m, IntervalArrayMap)
-    np.testing.assert_array_equal(view.result(), source[r_([30, 2, 10], [34, 8, 15])])
-    assert m._index_array is None
+    assert isinstance(view.transform.output[0], IntervalArrayMap)
+    expected = source[r_([30, 2, 10], [34, 8, 15])]
+    real_indices = Intervals.indices
+
+    def indices(self: Intervals) -> np.ndarray[Any, Any]:
+        # Splitting a chunk into several pieces lists that chunk's indices; the
+        # whole selection is never listed.
+        assert self.size < expected.shape[0], "built the full index array"
+        return real_indices(self)
+
+    monkeypatch.setattr(Intervals, "indices", indices)
+    np.testing.assert_array_equal(view.result(), expected)
 
 
 def test_plan_of_huge_intervals_is_per_interval() -> None:
@@ -115,6 +152,26 @@ def test_same_map_as_the_index_list() -> None:
     restored = pickle.loads(pickle.dumps(by_intervals.output[0]))
     assert type(restored) is ArrayMap
     assert restored == by_list.output[0]
+    replaced = dataclasses.replace(by_intervals.output[0], offset=3)
+    assert replaced == dataclasses.replace(by_list.output[0], offset=3)
+
+
+def test_changing_the_callers_arrays_changes_nothing() -> None:
+    lo, hi = np.array([1, 9]), np.array([4, 12])
+    selector = Intervals(lo, hi)
+    transform = IndexTransform.from_shape((20,)).oindex[selector]
+    lo[0], hi[1] = 0, 10
+    with pytest.raises(ValueError, match="read-only"):
+        selector.hi[1] = 10
+    assert transform == IndexTransform.from_shape((20,)).oindex[r_([1, 9], [4, 12])]
+
+
+def test_empty_intervals_may_lie_outside_like_np_r() -> None:
+    source = np.arange(12)
+    view = LazyArray.from_numpy(source).oindex[Intervals([13, 0, 5], [13, 2, 7])]
+    np.testing.assert_array_equal(view.result(), source[np.r_[13:13, 0:2, 5:7]])
+    t = IndexTransform.from_shape((12,)).oindex[Intervals([13, 0, 5], [13, 2, 7])]
+    assert t == IndexTransform.from_shape((12,)).oindex[[0, 1, 5, 6]]
 
 
 def test_pieces_merge_and_single_pieces_are_slices() -> None:
@@ -161,16 +218,29 @@ def test_further_selections_stay_correct() -> None:
     np.testing.assert_array_equal(view.vindex[[0, 14], [2, 1]].result(), rows[[0, 14], [2, 1]])
 
 
-def test_errors() -> None:
+@pytest.mark.parametrize(
+    ("select", "error", "match"),
+    [
+        (lambda v, t: v.oindex[Intervals([8], [11])], IndexError, "out of bounds"),
+        (lambda v, t: v[Intervals([1], [3])], IndexError, "oindex"),
+        (lambda v, t: v.vindex[Intervals([1], [3])], IndexError, "oindex"),
+        (lambda v, t: t.oindex[Intervals([8], [11])], BoundsCheckError, "outside"),
+        (lambda v, t: t.vindex[Intervals([1], [3])], IndexError, "oindex"),
+        (lambda v, t: t.select(Intervals([1], [3]), mode="vectorized"), IndexError, "oindex"),
+    ],
+    ids=[
+        "view-bounds",
+        "view-basic",
+        "view-vindex",
+        "transform-bounds",
+        "transform-vindex",
+        "select-vectorized",
+    ],
+)
+def test_errors(select: Any, error: type[Exception], match: str) -> None:
     view = LazyArray.from_numpy(np.arange(10))
-    with pytest.raises(IndexError, match="out of bounds"):
-        view.oindex[Intervals([8], [11])]
-    with pytest.raises(IndexError, match="oindex"):
-        view[Intervals([1], [3])]
-    with pytest.raises(IndexError, match="oindex"):
-        view.vindex[Intervals([1], [3])]
-    with pytest.raises(BoundsCheckError, match="outside"):
-        IndexTransform.from_shape((10,)).oindex[Intervals([8], [11])]
+    with pytest.raises(error, match=match):
+        select(view, IndexTransform.from_shape((10,)))
 
 
 @pytest.mark.parametrize(

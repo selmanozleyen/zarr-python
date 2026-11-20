@@ -799,8 +799,6 @@ def _interval_set(out_dim: int, m: IntervalArrayMap, dg: DimensionGridLike) -> I
     starts = checked_affine(m.offset, 1, m.intervals.lo[keep])
     stops = starts + lengths[keep]
     position = (np.cumsum(lengths) - lengths)[keep]
-    dg.index_to_chunk(int(starts.min()))
-    dg.index_to_chunk(int((stops - 1).max()))
     first = dg.indices_to_chunks(starts)
     count = dg.indices_to_chunks(stops - 1) - first + 1
     # One piece per (interval, chunk it crosses), in request order.
@@ -826,7 +824,7 @@ def _interval_set(out_dim: int, m: IntervalArrayMap, dg: DimensionGridLike) -> I
     rows, counts = np.unique(row[head], return_counts=True)
     return IntervalSet(
         output_dimension=out_dim,
-        input_dimension=m.axis,
+        input_dimension=m.dependency_axes[0],
         chunk=np.asarray(unique[rows], dtype=np.intp),
         chunk_start=unique_start[rows],
         chunk_extent=unique_extent[rows],
@@ -991,6 +989,8 @@ def _interval_piece(axis: IntervalSet, row: int, rank: int, origin: int) -> _Axi
             DimensionMap(input_dimension=k, offset=origin + int(position[0])),
             start == 0 and count == c_extent,
         )
+    # Several pieces are reported as partial coverage even when they tile the
+    # chunk, as `IndexedSet` rows are.
     shape = (1,) * k + (count,) + (1,) * (rank - k - 1)
     return (
         int(axis.chunk[row]),
