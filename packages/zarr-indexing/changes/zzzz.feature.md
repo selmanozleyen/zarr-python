@@ -1,1 +1,0 @@
-Chunk planning reads an `Intervals` selection per interval rather than per index, into a new `IntervalSet` table. `GridPartition.sets` can now hold an `IntervalSet`, so code that dispatches on `StridedSet` and `IndexedSet`, or narrows `sets` exhaustively, needs a branch for it.

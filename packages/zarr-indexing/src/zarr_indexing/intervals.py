@@ -23,7 +23,8 @@ class Intervals:
     An orthogonal selector: `view.oindex[Intervals(lo, hi), :]` selects what
     `view.oindex[np.r_[lo[0]:hi[0], lo[1]:hi[1], ...], :]` does, without listing
     every index. Positions are not wrapped, so they must be non-negative.
-    Overlapping and repeated intervals are allowed; empty ones are dropped.
+    Overlapping and repeated intervals are allowed; empty ones are dropped and
+    touching ones merged.
     The `[lo, hi)` pairs are ndsel's `intervals`. Immutable.
 
     Examples
@@ -37,10 +38,10 @@ class Intervals:
     __slots__ = ("hi", "lo", "size")
 
     lo: npt.NDArray[np.intp]
-    """First index of each non-empty interval."""
+    """First index of each interval, after dropping empty ones and merging touching ones."""
 
     hi: npt.NDArray[np.intp]
-    """One past the last index of each non-empty interval."""
+    """One past the last index of each interval, likewise."""
 
     size: int
     """How many indices the intervals select."""
@@ -66,12 +67,16 @@ class Intervals:
         size = int(lengths.sum()) if fits else sum(lengths.tolist())
         if size > _INTP_MAX:
             raise OverflowError(f"the intervals select {size} indices, more than np.intp holds")
-        keep = lengths > 0  # boolean indexing copies, so the caller's arrays are not kept
-        self._init(_read_only(lo_array[keep]), _read_only(hi_array[keep]), size)
-
-    def _init(self, lo: npt.NDArray[np.intp], hi: npt.NDArray[np.intp], size: int) -> None:
-        object.__setattr__(self, "lo", lo)
-        object.__setattr__(self, "hi", hi)
+        keep = lengths > 0
+        lo_array, hi_array = lo_array[keep], hi_array[keep]
+        # Merge touching intervals: [a, b) then [b, c) is [a, c).
+        head = np.ones(lo_array.size, dtype=bool)
+        head[1:] = lo_array[1:] != hi_array[:-1]
+        tail = np.ones(lo_array.size, dtype=bool)
+        tail[:-1] = head[1:]
+        # Boolean indexing copies, so the caller's arrays are not kept.
+        object.__setattr__(self, "lo", _read_only(lo_array[head]))
+        object.__setattr__(self, "hi", _read_only(hi_array[tail]))
         object.__setattr__(self, "size", size)
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -86,13 +91,7 @@ class Intervals:
 
     def shifted(self, offset: int) -> Intervals:
         """The same intervals moved by `offset`."""
-        moved = object.__new__(Intervals)
-        moved._init(
-            _read_only(checked_affine(offset, 1, self.lo)),
-            _read_only(checked_affine(offset, 1, self.hi)),
-            self.size,
-        )
-        return moved
+        return Intervals(checked_affine(offset, 1, self.lo), checked_affine(offset, 1, self.hi))
 
     def indices(self) -> npt.NDArray[np.intp]:
         """Every selected index, in order: `np.r_[lo[0]:hi[0], lo[1]:hi[1], ...]`."""

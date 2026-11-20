@@ -467,8 +467,7 @@ class IntervalSet:
     CSR form: row ``i`` owns pieces ``pointer[i]:pointer[i + 1]``, in request
     order. Piece ``j`` is ``extent[j]`` consecutive chunk-local coordinates from
     ``local_start[j]``, filling request positions from ``origin[j]``, counted
-    from the request axis's lower bound. Pieces that continue each other in
-    storage and in the request are merged. No column has an entry per index.
+    from the request axis's lower bound. No column has an entry per index.
 
     Examples
     --------
@@ -805,35 +804,23 @@ def _interval_set(out_dim: int, m: IntervalArrayMap, dg: DimensionGridLike) -> I
     count = dg.indices_to_chunks(stops - 1) - first + 1
     # One piece per (interval, chunk it crosses), in request order.
     interval = np.repeat(np.arange(starts.size, dtype=np.intp), count)
-    step = np.arange(interval.size, dtype=np.intp) - np.repeat(np.cumsum(count) - count, count)
-    unique, inverse = np.unique(np.repeat(first, count) + step, return_inverse=True)
+    unique, inverse = np.unique(concat_ranges(first, first + count), return_inverse=True)
     unique_start, unique_extent = _chunk_bounds(dg, np.asarray(unique, dtype=np.intp))
     c_start = unique_start[inverse]
     lo = np.maximum(starts[interval], c_start)
     hi = np.minimum(stops[interval], c_start + unique_extent[inverse])
     order = np.argsort(inverse, kind="stable")
-    row = inverse[order]
-    local = (lo - c_start)[order]
-    extent = (hi - lo)[order]
-    piece_origin = (position[interval] + lo - starts[interval])[order]
-    # Pieces that continue each other in storage and in the request merge.
-    continues = (
-        (row[1:] == row[:-1])
-        & (local[1:] == local[:-1] + extent[:-1])
-        & (piece_origin[1:] == piece_origin[:-1] + extent[:-1])
-    )
-    head = np.flatnonzero(np.concatenate([[True], ~continues]))
-    rows, counts = np.unique(row[head], return_counts=True)
+    counts = np.bincount(inverse, minlength=unique.size)
     return IntervalSet(
         output_dimension=out_dim,
         input_dimension=m.dependency_axes[0],
-        chunk=np.asarray(unique[rows], dtype=np.intp),
-        chunk_start=unique_start[rows],
-        chunk_extent=unique_extent[rows],
+        chunk=np.asarray(unique, dtype=np.intp),
+        chunk_start=unique_start,
+        chunk_extent=unique_extent,
         pointer=np.concatenate([[0], np.cumsum(counts)]).astype(np.intp),
-        local_start=local[head],
-        extent=np.add.reduceat(extent, head),
-        origin=piece_origin[head],
+        local_start=(lo - c_start)[order],
+        extent=(hi - lo)[order],
+        origin=(position[interval] + lo - starts[interval])[order],
     )
 
 

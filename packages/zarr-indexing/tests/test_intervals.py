@@ -34,6 +34,9 @@ def test_indices_are_np_r() -> None:
     assert Intervals([5, 0, 3, 3], [8, 2, 3, 4]).indices().tolist() == [5, 6, 7, 0, 1, 3]
     assert Intervals([], []).indices().tolist() == []
     assert repr(Intervals([3, 1], [3, 3])) == "Intervals(lo=[1], hi=[3])"  # empty ones dropped
+    assert (
+        repr(Intervals([0, 2, 5], [2, 4, 7])) == "Intervals(lo=[0, 5], hi=[4, 7])"
+    )  # touching merged
 
 
 @pytest.mark.parametrize(
@@ -133,6 +136,7 @@ def test_pickle_and_copy_keep_intervals(monkeypatch: pytest.MonkeyPatch) -> None
     assert len(data) < 2000
     restored = pickle.loads(data).output[0]
     assert isinstance(restored, IntervalArrayMap)
+    assert "IntervalArrayMap(Intervals(" in repr(restored)
     for selector in (
         pickle.loads(pickle.dumps(restored.intervals)),
         copy.deepcopy(restored.intervals),
