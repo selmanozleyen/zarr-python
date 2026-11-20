@@ -1620,7 +1620,7 @@ def _apply_oindex(transform: IndexTransform, selection: Any) -> IndexTransform:
             _check_array_in_bounds(ends, lo, hi)
             dim_array[old_dim] = sel
             new_inclusive_min.append(0)
-            new_exclusive_max.append(sel.size)
+            new_exclusive_max.append(sel.size if isinstance(sel, Intervals) else len(sel))
             old_to_new_dim[old_dim] = new_dim_idx
             new_dim_idx += 1
         else:

@@ -261,6 +261,12 @@ def test_further_selections_stay_correct() -> None:
     np.testing.assert_array_equal(view.vindex[[0, 14], [2, 1]].result(), rows[[0, 14], [2, 1]])
 
 
+def test_two_dimensional_oindex_array_still_raises() -> None:
+    # Unchanged from before `Intervals`: the array's length, not its size, sizes the axis.
+    with pytest.raises(ValueError, match="neither 1 nor"):
+        IndexTransform.from_shape((10, 3)).oindex[np.array([[1, 2]]), :]
+
+
 @pytest.mark.parametrize(
     ("select", "error", "match"),
     [
