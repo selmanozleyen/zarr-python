@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import dataclasses
+import copy
 import pickle
 from typing import Any
 
@@ -10,7 +10,6 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from zarr_indexing import (
-    ArrayMap,
     BoundsCheckError,
     ConstantMap,
     DimensionMap,
@@ -46,8 +45,9 @@ def test_indices_are_np_r() -> None:
         ([0.5], [1], TypeError),
         (np.array([0], np.uint64), np.array([2**63 + 5], np.uint64), OverflowError),
         ([0, 0], [2**62, 2**62], OverflowError),
+        ([0, 0, 0], [2**63 - 1] * 3, OverflowError),
     ],
-    ids=["lengths", "2-d", "hi-below-lo", "float", "uint64", "size"],
+    ids=["lengths", "2-d", "hi-below-lo", "float", "uint64-value", "size", "size-past-uint64"],
 )
 def test_validation(lo: Any, hi: Any, error: type[Exception]) -> None:
     with pytest.raises(error):
@@ -130,9 +130,11 @@ def test_planning_and_reading_never_build_the_index_array(
     np.testing.assert_array_equal(view.result(), source[r_([30, 2, 10], [34, 8, 15])])
 
 
-def test_out_of_grid_error_names_the_coordinate() -> None:
-    transform = IndexTransform.from_shape((20,)).oindex[Intervals([1, 9], [4, 12])].translate((15,))
-    with pytest.raises(IndexError, match="index 26 is out of bounds"):
+@pytest.mark.parametrize(("offset", "coordinate"), [(15, 26), (-5, -4)], ids=["above", "below"])
+def test_out_of_grid_error_names_the_coordinate(offset: int, coordinate: int) -> None:
+    selected = IndexTransform.from_shape((20,)).oindex[Intervals([1, 9], [4, 12])]
+    transform = selected.translate((offset,))
+    with pytest.raises(IndexError, match=f"index {coordinate} is out of bounds"):
         list(plan_chunks(transform, dimension_grids_from_chunks((4,), shape=(25,))))
 
 
@@ -154,9 +156,34 @@ def test_same_map_as_the_index_list() -> None:
     assert by_intervals == by_list
     assert hash(by_intervals) == hash(by_list)
     assert by_intervals.to_json() == by_list.to_json()
-    restored = pickle.loads(pickle.dumps(by_intervals.output[0]))
-    assert type(restored) is ArrayMap
-    assert restored == by_list.output[0]
+    assert pickle.loads(pickle.dumps(by_intervals)) == by_list
+
+
+def test_planning_near_the_intp_limit_overflows_cleanly() -> None:
+    transform = (
+        IndexTransform.from_shape((20,)).oindex[Intervals([0], [20])].translate((2**63 - 10,))
+    )
+    with pytest.raises(OverflowError):
+        list(plan_chunks(transform, dimension_grids_from_chunks((4,), shape=(2**63 - 1,))))
+
+
+def test_pickle_and_copy_keep_intervals(monkeypatch: pytest.MonkeyPatch) -> None:
+    def indices(self: Intervals) -> np.ndarray[Any, Any]:
+        raise AssertionError("built the full index array")
+
+    monkeypatch.setattr(Intervals, "indices", indices)
+    n = 10**12
+    transform = IndexTransform.from_shape((n,)).oindex[Intervals([0, n - 10**9], [10**9, n])]
+    data = pickle.dumps(transform)
+    assert len(data) < 2000
+    restored = pickle.loads(data).output[0]
+    assert isinstance(restored, IntervalArrayMap)
+    for selector in (
+        pickle.loads(pickle.dumps(restored.intervals)),
+        copy.deepcopy(restored.intervals),
+    ):
+        with pytest.raises(ValueError, match="read-only"):
+            selector.hi[0] = 1
 
 
 def test_intervals_cannot_change_after_selecting() -> None:
@@ -168,7 +195,7 @@ def test_intervals_cannot_change_after_selecting() -> None:
         selector.hi[1] = 10
     with pytest.raises(ValueError, match="WRITEABLE"):
         selector.hi.flags.writeable = True
-    with pytest.raises(dataclasses.FrozenInstanceError):
+    with pytest.raises(AttributeError, match="immutable"):
         selector.hi = np.array([4, 10])
     assert transform == IndexTransform.from_shape((20,)).oindex[r_([1, 9], [4, 12])]
 
@@ -277,14 +304,17 @@ def test_plan_maps_every_cell_like_the_index_list(shift: Any) -> None:
     expected = shift(IndexTransform.from_shape((20,)).oindex[r_(lo, hi)])
     assert isinstance(transform.output[0], IntervalArrayMap)
     grids = dimension_grids_from_chunks((4,), shape=(25,))
-    mapped = {}
+    mapped: dict[int, int] = {}
+    planned = 0
     for p in plan_chunks(transform, grids):
         points = np.arange(p.chunk_transform.domain.shape[0]).reshape(-1, 1)
         cells = p.cell_transform.apply_many(points)[:, 0]
         storage = p.chunk_transform.apply_many(points)[:, 0] + p.chunk_domain.inclusive_min[0]
         mapped.update(zip(cells.tolist(), storage.tolist(), strict=True))
+        planned += len(cells)
     lo_cell = expected.domain.inclusive_min[0]
     cells = np.arange(lo_cell, expected.domain.exclusive_max[0]).reshape(-1, 1)
+    assert planned == len(mapped)  # no cell is planned twice
     assert mapped == dict(
         zip(cells[:, 0].tolist(), expected.apply_many(cells)[:, 0].tolist(), strict=True)
     )

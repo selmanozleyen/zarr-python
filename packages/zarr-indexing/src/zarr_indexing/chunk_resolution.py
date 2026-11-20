@@ -796,7 +796,7 @@ def _group_by_key(
 def _interval_set(out_dim: int, m: IntervalArrayMap, dg: DimensionGridLike) -> IntervalSet:
     lengths = m.intervals.hi - m.intervals.lo
     starts = checked_affine(m.offset, 1, m.intervals.lo)
-    stops = starts + lengths
+    stops = checked_affine(m.offset, 1, m.intervals.hi)
     position = np.cumsum(lengths) - lengths
     # As in `_indexed_set`: the scalar lookup's error names the coordinate.
     dg.index_to_chunk(int(starts.min()))
@@ -981,10 +981,9 @@ def _interval_piece(axis: IntervalSet, row: int, rank: int, origin: int) -> _Axi
     chunk_map: OutputIndexMap
     cell_map: OutputIndexMap
     if local.size == 1:
-        start = int(local[0])
-        chunk_map = DimensionMap(input_dimension=k, offset=start)
+        chunk_map = DimensionMap(input_dimension=k, offset=int(local[0]))
         cell_map = DimensionMap(input_dimension=k, offset=origin + int(position[0]))
-        full = start == 0 and count == c_extent
+        full = count == c_extent
     else:
         # Several pieces become index arrays, so coverage is "unknown" even when
         # they tile the chunk, as for `IndexedSet` rows.
@@ -1079,8 +1078,9 @@ class GridPartition:
             )
             return _strided_piece(axis, row, origin)
         if isinstance(axis, IntervalSet):
-            origin = domain.inclusive_min[axis.input_dimension]
-            return _interval_piece(axis, row, domain.ndim, origin)
+            return _interval_piece(
+                axis, row, domain.ndim, domain.inclusive_min[axis.input_dimension]
+            )
         return _indexed_piece(axis, row, domain.ndim, domain.inclusive_min[axis.input_dimension])
 
     def _unbound(self) -> tuple[list[OutputIndexMap | None], bool]:

@@ -211,7 +211,7 @@ class ArrayMap:
         frozen = np.frombuffer(normalized.tobytes(), dtype=np.intp).reshape(normalized.shape)
         object.__setattr__(self, "index_array", frozen)
 
-    def __reduce__(self) -> tuple[object, tuple[object, int, int]]:
+    def __reduce__(self) -> tuple[object, tuple[object, ...]]:
         """Reconstruct through `__init__`, preserving the ownership invariant."""
         return (
             type(self),

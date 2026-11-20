@@ -440,9 +440,10 @@ rank one and source rank two.
 
 `Intervals(lo, hi)` in `.oindex` selects the half-open runs `[lo[i], hi[i])` in
 order, what `np.r_[lo[0]:hi[0], ...]` selects, without listing every index.
-Chunk planning reads the intervals directly. Anything else that needs the
-indices builds the full list: comparing, hashing, serializing, and a further
-selection on the view:
+Chunk planning and pickling use the intervals directly. Anything else builds
+the full list: comparing, hashing, JSON, a further selection on the view,
+`.vindex` arrays beside the intervals, and selecting on a strided or reversed
+view:
 
 ```python
 --8<-- "snippets/intervals.py:intervals"

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -15,8 +14,9 @@ if TYPE_CHECKING:
 
 __all__ = ["Intervals"]
 
+_INTP_MAX = int(np.iinfo(np.intp).max)
 
-@dataclass(frozen=True, slots=True, eq=False)
+
 class Intervals:
     """Half-open intervals `[lo[i], hi[i])` along one axis, read in order.
 
@@ -33,6 +33,8 @@ class Intervals:
     >>> view.oindex[Intervals(lo=[7, 1], hi=[9, 3])].result()
     array([70, 80, 10, 20])
     """
+
+    __slots__ = ("hi", "lo", "size")
 
     lo: npt.NDArray[np.intp]
     """First index of each non-empty interval."""
@@ -54,13 +56,15 @@ class Intervals:
             if array.size and not np.issubdtype(array.dtype, np.integer):
                 raise TypeError(f"{name} must have an integer dtype, got {array.dtype}")
         lo_array, hi_array = checked_affine(0, 1, lo_array), checked_affine(0, 1, hi_array)
-        # Exact Python integers, as `hi - lo` and its sum can overflow np.intp
-        # (about 50 ms per million intervals).
-        lengths = hi_array.astype(object) - lo_array.astype(object)
-        if (lengths < 0).any():
+        if (hi_array < lo_array).any():
             raise ValueError("every interval needs lo <= hi")
-        size = int(lengths.sum())
-        if size > np.iinfo(np.intp).max:
+        # With hi >= lo the difference fits uint64 exactly; the sum is exact in
+        # Python integers when it could overflow.
+        lengths = hi_array.astype(np.uint64) - lo_array.astype(np.uint64)
+        n = lengths.size
+        fits = n == 0 or int(lengths.max()) <= _INTP_MAX // n
+        size = int(lengths.sum()) if fits else sum(lengths.tolist())
+        if size > _INTP_MAX:
             raise OverflowError(f"the intervals select {size} indices, more than np.intp holds")
         keep = lengths > 0  # boolean indexing copies, so the caller's arrays are not kept
         self._init(_read_only(lo_array[keep]), _read_only(hi_array[keep]), size)
@@ -69,6 +73,13 @@ class Intervals:
         object.__setattr__(self, "lo", lo)
         object.__setattr__(self, "hi", hi)
         object.__setattr__(self, "size", size)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("Intervals is immutable")
+
+    def __reduce__(self) -> tuple[object, tuple[object, object]]:
+        """Rebuild through `__init__`, so a copy is read-only too."""
+        return (Intervals, (self.lo, self.hi))
 
     def __repr__(self) -> str:
         return f"Intervals(lo={self.lo.tolist()}, hi={self.hi.tolist()})"
@@ -109,8 +120,7 @@ class IntervalArrayMap(ArrayMap):
 
     It is the same map as the `ArrayMap` of `intervals.indices()`: it compares,
     serializes and composes as that map, and builds the index array the first
-    time an operation asks for it. Chunk planning reads the intervals instead.
-    Pickling gives the plain `ArrayMap`.
+    time an operation asks for it. Chunk planning and pickling use the intervals.
     """
 
     __slots__ = ("_index_array", "_shape", "intervals")
@@ -151,9 +161,13 @@ class IntervalArrayMap(ArrayMap):
             self.intervals, self.dependency_axes[0], len(self._shape), offset, stride
         )
 
-    def __reduce__(self) -> tuple[object, tuple[object, int, int]]:
-        """Pickle as the plain `ArrayMap` it equals."""
-        return (ArrayMap, (self.index_array, self.offset, self.stride))
+    def __reduce__(self) -> tuple[object, tuple[object, ...]]:
+        """Pickle the intervals, not the index array."""
+        axis = self.dependency_axes[0]
+        return (
+            IntervalArrayMap,
+            (self.intervals, axis, len(self._shape), self.offset, self.stride),
+        )
 
     def __repr__(self) -> str:
         return (

@@ -32,6 +32,8 @@ if TYPE_CHECKING:
 
 SelectionMode = Literal["basic", "orthogonal", "vectorized"]
 
+_INTERVALS_NEED_OINDEX = "Intervals select along one axis; use .oindex"
+
 
 def _as_index_array(sel: Any) -> np.ndarray[Any, np.dtype[Any]] | None:
     """Return `sel` as an ndarray if it is array-like, else None."""
@@ -173,7 +175,7 @@ def validate_advanced_selection(
 
     for sel, axis in zip(entries, axes, strict=True):
         if mode == "vectorized" and isinstance(sel, Intervals):
-            raise IndexError("Intervals select along one axis; use .oindex")
+            raise IndexError(_INTERVALS_NEED_OINDEX)
         arr = _as_index_array(sel)
         if arr is None:
             continue
@@ -369,7 +371,7 @@ def normalize_positional_selection(
             result.append(_normalize_int_array(arr, size, axis) + origin[axis])
         elif isinstance(sel, Intervals):
             if mode != "orthogonal":
-                raise IndexError("Intervals select along one axis; use .oindex")
+                raise IndexError(_INTERVALS_NEED_OINDEX)
             if sel.size and (int(sel.lo.min()) < 0 or int(sel.hi.max()) > size):
                 raise IndexError(f"intervals out of bounds for axis {axis} with size {size}")
             result.append(sel.shifted(origin[axis]))
