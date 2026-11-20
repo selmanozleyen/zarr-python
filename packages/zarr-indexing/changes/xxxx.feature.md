@@ -1,0 +1,1 @@
+Add `ArrayMap.shape`. Transform validation, its `repr` and `ArrayMap.dependency_axes` read the shape through it rather than from `index_array`, so an `ArrayMap` subclass can store its indices compactly and build `index_array` only when asked.

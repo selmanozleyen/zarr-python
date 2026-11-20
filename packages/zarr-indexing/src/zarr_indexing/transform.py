@@ -132,9 +132,9 @@ class IndexTransform:
                 # JSON may use a lower-rank array that broadcasts against the
                 # domain; `from_json` widens those on the way in,
                 # so the invariant holds for every transform that exists.
-                if m.index_array.ndim != self.domain.ndim:
+                if len(m.shape) != self.domain.ndim:
                     raise ValueError(
-                        f"output[{i}].index_array has {m.index_array.ndim} dims "
+                        f"output[{i}].index_array has {len(m.shape)} dims "
                         f"but input domain has {self.domain.ndim} dims"
                     )
                 # Every axis is either the domain's extent or a singleton it
@@ -144,7 +144,7 @@ class IndexTransform:
                 bad = [
                     (axis, size, extent)
                     for axis, (size, extent) in enumerate(
-                        zip(m.index_array.shape, self.domain.shape, strict=True)
+                        zip(m.shape, self.domain.shape, strict=True)
                     )
                     if size not in (1, extent)
                 ]
@@ -153,7 +153,7 @@ class IndexTransform:
                     raise ValueError(
                         f"output[{i}].index_array has {size} entries on axis {axis}, "
                         f"which is neither 1 nor the domain's extent of {extent} "
-                        f"(index_array shape {m.index_array.shape}, "
+                        f"(index_array shape {m.shape}, "
                         f"domain shape {self.domain.shape})"
                     )
 
@@ -504,7 +504,7 @@ class IndexTransform:
                 maps.append(f"out[{i}] = {m.offset} + {m.stride} * in[{m.input_dimension}]")
             else:
                 # m: ArrayMap (OutputIndexMap = ConstantMap | DimensionMap | ArrayMap)
-                maps.append(f"out[{i}] = {m.offset} + {m.stride} * arr{m.index_array.shape}[in]")
+                maps.append(f"out[{i}] = {m.offset} + {m.stride} * arr{m.shape}[in]")
         maps_str = ", ".join(maps)
         return f"IndexTransform(domain={self.domain}, {maps_str})"
 

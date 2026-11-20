@@ -5,6 +5,7 @@ import pickle
 import numpy as np
 import pytest
 
+from zarr_indexing import IndexTransform
 from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap
 
 
@@ -57,6 +58,12 @@ class TestArrayMap:
         arr = np.array([0], dtype=np.intp)
         m = ArrayMap(index_array=arr)
         assert isinstance(m, ArrayMap)
+
+    def test_shape_is_the_index_arrays(self) -> None:
+        m = ArrayMap(index_array=np.zeros((1, 3, 1), dtype=np.intp))
+        assert m.shape == (1, 3, 1)
+        assert m.dependency_axes == (1,)
+        assert "arr(2,)" in repr(IndexTransform.from_shape((5,)).oindex[[1, 3]])
 
     def test_owns_index_array_and_keeps_hash_stable(self) -> None:
         arr = np.array([1, 3, 5], dtype=np.intp)
