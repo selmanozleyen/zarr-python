@@ -40,6 +40,7 @@ from zarr_indexing._selector import as_scalar_index, require_index
 from zarr_indexing.boundary import validate_advanced_selection
 from zarr_indexing.domain import IndexDomain
 from zarr_indexing.errors import BoundsCheckError, VindexInvalidSelectionError
+from zarr_indexing.intervals import IntervalArrayMap, Intervals
 from zarr_indexing.output_map import (
     ArrayMap,
     ConstantMap,
@@ -1539,8 +1540,8 @@ class _OIndexHelper:
 
 def _normalize_oindex_selection(
     selection: Any, ndim: int
-) -> tuple[np.ndarray[Any, np.dtype[np.intp]] | slice, ...]:
-    """Normalize an oindex selection: arrays, slices, booleans, integers."""
+) -> tuple[np.ndarray[Any, np.dtype[np.intp]] | Intervals | slice, ...]:
+    """Normalize an oindex selection: arrays, slices, booleans, integers, `Intervals`."""
     if not isinstance(selection, tuple):
         selection = (selection,)
 
@@ -1605,24 +1606,26 @@ def _apply_oindex(transform: IndexTransform, selection: Any) -> IndexTransform:
     old_to_new_dim: dict[int, int] = {}
 
     # Info per old dim
-    dim_array: dict[int, np.ndarray[Any, np.dtype[np.intp]]] = {}
+    dim_array: dict[int, np.ndarray[Any, np.dtype[np.intp]] | Intervals] = {}
     dim_slice_params: dict[int, tuple[int, int, int]] = {}
 
     for old_dim, sel in enumerate(normalized):
-        if isinstance(sel, np.ndarray):
+        if isinstance(sel, (np.ndarray, Intervals)):
             lo = transform.domain.inclusive_min[old_dim]
             hi = transform.domain.exclusive_max[old_dim]
             # Index-array values are literal domain coordinates; the fancy dim
             # they create gets a fresh zero-origin [0, n) domain (TensorStore).
-            _check_array_in_bounds(sel, lo, hi)
+            # Intervals are non-empty, so their ends bound the indices.
+            ends = np.concatenate([sel.lo, sel.hi - 1]) if isinstance(sel, Intervals) else sel
+            _check_array_in_bounds(ends, lo, hi)
             dim_array[old_dim] = sel
             new_inclusive_min.append(0)
-            new_exclusive_max.append(len(sel))
+            new_exclusive_max.append(sel.size if isinstance(sel, Intervals) else len(sel))
             old_to_new_dim[old_dim] = new_dim_idx
             new_dim_idx += 1
         else:
             # sel: slice (_normalize_oindex_selection returns
-            # tuple[np.ndarray | slice, ...])
+            # tuple[np.ndarray | Intervals | slice, ...])
             lo = transform.domain.inclusive_min[old_dim]
             hi = transform.domain.exclusive_max[old_dim]
             start, step, origin, size = _resolve_slice_ts(sel, old_dim, lo, hi)
@@ -1650,7 +1653,15 @@ def _apply_oindex(transform: IndexTransform, selection: Any) -> IndexTransform:
                 # dependency axis is readable from the shape. A single-entry
                 # selection holds one coordinate and collapses to the
                 # ConstantMap it equals; its length-1 axis stays in the domain.
-                full_arr = _reshape_to_axis(dim_array[d], new_axis, new_dim_idx)
+                selected = dim_array[d]
+                if isinstance(selected, Intervals):
+                    if selected.size > 1:
+                        new_output.append(
+                            IntervalArrayMap(selected, new_axis, new_dim_idx, m.offset, m.stride)
+                        )
+                        continue
+                    selected = selected.indices()
+                full_arr = _reshape_to_axis(selected, new_axis, new_dim_idx)
                 new_output.append(array_map_or_constant(full_arr, offset=m.offset, stride=m.stride))
             elif d in dim_slice_params:
                 start, step, origin = dim_slice_params[d]
@@ -1979,6 +1990,8 @@ def _validate_array_selection(selection: Any, shape: tuple[int, ...], mode: str)
                 )
             continue
         if sel is Ellipsis or as_scalar_index(sel) is not None:
+            continue
+        if isinstance(sel, Intervals):
             continue
         if isinstance(sel, (list, np.ndarray)):
             if mode == "orthogonal":
