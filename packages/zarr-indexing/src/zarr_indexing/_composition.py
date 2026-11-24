@@ -27,6 +27,7 @@ import numpy as np
 
 from zarr_indexing._affine import checked_affine
 from zarr_indexing.errors import BoundsCheckError
+from zarr_indexing.intervals import index_extremes
 from zarr_indexing.output_map import (
     ArrayMap,
     ConstantMap,
@@ -120,8 +121,7 @@ def _output_bounds(outer: IndexTransform, output_map: OutputIndexMap) -> tuple[i
         last = output_map.offset + output_map.stride * (input_hi - 1)
         return min(first, last), max(first, last)
 
-    index_lo = int(output_map.index_array.min())
-    index_hi = int(output_map.index_array.max())
+    index_lo, index_hi = index_extremes(output_map)
     first = output_map.offset + output_map.stride * index_lo
     last = output_map.offset + output_map.stride * index_hi
     return min(first, last), max(first, last)
@@ -164,11 +164,9 @@ def _compose_dimension(outer: IndexTransform, inner_map: DimensionMap) -> Output
 
     # outer_map: ArrayMap (OutputIndexMap = ConstantMap | DimensionMap | ArrayMap)
     # Affine post-composition leaves the index array (and hence its full
-    # input rank and dependency axes) untouched.
-    return ArrayMap(
-        index_array=outer_map.index_array,
-        offset=offset_i + stride_i * outer_map.offset,
-        stride=stride_i * outer_map.stride,
+    # input rank and dependency axes) untouched; a subclass keeps its storage.
+    return outer_map._with_affine(  # pyright: ignore[reportPrivateUsage]
+        offset_i + stride_i * outer_map.offset, stride_i * outer_map.stride
     )
 
 

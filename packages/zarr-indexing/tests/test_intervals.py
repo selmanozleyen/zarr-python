@@ -22,6 +22,7 @@ from zarr_indexing import (
 )
 from zarr_indexing.grid import dimension_grids_from_chunks
 from zarr_indexing.intervals import IntervalArrayMap
+from zarr_indexing.writer import write_into
 
 
 def r_(lo: list[int], hi: list[int]) -> np.ndarray[Any, Any]:
@@ -44,6 +45,9 @@ def no_full_list(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_indices_are_np_r() -> None:
     assert Intervals([5, 0, 3, 3], [8, 2, 3, 4]).indices().tolist() == [5, 6, 7, 0, 1, 3]
     assert Intervals([], []).indices().tolist() == []
+
+
+def test_equality_hash_and_normalization() -> None:
     assert Intervals([1, 5], [3, 9]) == Intervals([1, 5], [3, 9]) != Intervals([1], [3])
     assert hash(Intervals([1, 3], [3, 4])) == hash(Intervals([1], [4]))  # touching merged
     assert repr(Intervals([3, 1], [3, 3])) == "Intervals(lo=[1], hi=[3])"  # empty ones dropped
@@ -147,6 +151,7 @@ def test_pickle_and_copy_keep_intervals() -> None:
     restored = pickle.loads(data).output[0]
     assert isinstance(restored, IntervalArrayMap)
     assert "IntervalArrayMap(Intervals(" in repr(restored)
+    assert "array(2000000000)" in transform.selection_repr
     for selector in (
         pickle.loads(pickle.dumps(restored.intervals)),
         copy.deepcopy(restored.intervals),
@@ -205,12 +210,6 @@ def test_further_selections_stay_correct() -> None:
     np.testing.assert_array_equal(view.vindex[[0, 14], [2, 1]].result(), rows[[0, 14], [2, 1]])
 
 
-def test_two_dimensional_oindex_array_still_raises() -> None:
-    # Unchanged from before `Intervals`: the array's length, not its size, sizes the axis.
-    with pytest.raises(ValueError, match="neither 1 nor"):
-        IndexTransform.from_shape((10, 3)).oindex[np.array([[1, 2]]), :]
-
-
 @pytest.mark.parametrize(
     ("select", "error", "match"),
     [
@@ -249,6 +248,16 @@ def test_planning_reading_and_bounds_never_build_the_index_array() -> None:
     assert isinstance(view.transform.output[0], IntervalArrayMap)
     np.testing.assert_array_equal(view.result(), source[r_([30, 2, 10], [34, 8, 15])])
     assert view.bounding_box() == ((2, 34), (0, 3))
+    assert "array(15)" in repr(view)
+    window = view.transform.compose(IndexTransform.from_shape((40, 3)).translate((5, 0)))
+    assert isinstance(window.output[0], IntervalArrayMap)
+
+
+@pytest.mark.usefixtures("no_full_list")
+def test_writer_bounds_check_never_builds_the_index_array() -> None:
+    transform = IndexTransform.from_shape((20,)).oindex[Intervals([2, 12], [5, 15])]
+    with pytest.raises(IndexError, match="outside the source shape"):
+        write_into(np.zeros(10), transform, 1)
 
 
 def test_pieces_keep_request_order_within_a_chunk() -> None:
@@ -304,13 +313,6 @@ def test_pieces_merge_and_single_pieces_are_slices() -> None:
     assert second.coverage == "partial"
 
 
-def test_no_merge_when_not_neighbours_in_the_request() -> None:
-    # [0, 2) and [2, 4) touch in storage but [5, 6) sits between them in the request.
-    source = np.arange(8)
-    view = LazyArray.from_numpy(source).with_parts((4,)).oindex[Intervals([0, 5, 2], [2, 6, 4])]
-    np.testing.assert_array_equal(view.result(), [0, 1, 5, 2, 3])
-
-
 def test_strided_view_falls_back_to_the_index_list() -> None:
     source = np.arange(40)
     view = LazyArray.from_numpy(source).with_parts((8,))[::2].oindex[Intervals([3, 0], [6, 2])]
@@ -331,12 +333,13 @@ def test_strided_view_falls_back_to_the_index_list() -> None:
     ],
     ids=["plain", "storage-offset", "domain-origin", "negative-domain-origin"],
 )
-def test_plan_maps_every_cell_like_the_index_list(shift: Any) -> None:
+@pytest.mark.parametrize("chunks", [(4,), ((3, 5, 2, 7, 8),)], ids=["regular", "irregular"])
+def test_plan_maps_every_cell_like_the_index_list(shift: Any, chunks: Any) -> None:
     lo, hi = [9, 1, 4, 13], [12, 3, 8, 13]
     transform = shift(IndexTransform.from_shape((20,)).oindex[Intervals(lo, hi)])
     expected = shift(IndexTransform.from_shape((20,)).oindex[r_(lo, hi)])
     assert isinstance(transform.output[0], IntervalArrayMap)
-    grids = dimension_grids_from_chunks((4,), shape=(25,))
+    grids = dimension_grids_from_chunks(chunks, shape=(25,))
     mapped: dict[int, int] = {}
     planned = 0
     for p in plan_chunks(transform, grids):

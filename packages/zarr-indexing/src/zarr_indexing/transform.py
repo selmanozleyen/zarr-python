@@ -487,9 +487,9 @@ class IndexTransform:
                     parts.append(f"[{start}, {stop}) step {m.stride}")
             else:
                 # m: ArrayMap (OutputIndexMap = ConstantMap | DimensionMap | ArrayMap)
-                storage = m.offset + m.stride * m.index_array
-                n = int(storage.size)  # .size, not len(): index_array may be 0-d
+                n = math.prod(m.shape)  # not len(): index_array may be 0-d
                 if n <= 5:
+                    storage = m.offset + m.stride * m.index_array
                     vals = ", ".join(str(int(v)) for v in storage.ravel())
                     parts.append("{" + vals + "}")
                 else:
@@ -1615,7 +1615,7 @@ def _apply_oindex(transform: IndexTransform, selection: Any) -> IndexTransform:
             hi = transform.domain.exclusive_max[old_dim]
             # Index-array values are literal domain coordinates; the fancy dim
             # they create gets a fresh zero-origin [0, n) domain (TensorStore).
-            # Intervals are non-empty, so their ends bound the indices.
+            # Each interval is non-empty, so the ends bound the indices.
             ends = np.concatenate([sel.lo, sel.hi - 1]) if isinstance(sel, Intervals) else sel
             _check_array_in_bounds(ends, lo, hi)
             dim_array[old_dim] = sel
@@ -1989,9 +1989,7 @@ def _validate_array_selection(selection: Any, shape: tuple[int, ...], mode: str)
                     f"(single Boolean array) are supported; got {selection!r}"
                 )
             continue
-        if sel is Ellipsis or as_scalar_index(sel) is not None:
-            continue
-        if isinstance(sel, Intervals):
+        if sel is Ellipsis or isinstance(sel, Intervals) or as_scalar_index(sel) is not None:
             continue
         if isinstance(sel, (list, np.ndarray)):
             if mode == "orthogonal":

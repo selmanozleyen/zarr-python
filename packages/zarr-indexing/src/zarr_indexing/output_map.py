@@ -244,7 +244,7 @@ class ArrayMap:
         return (
             self.offset == other.offset
             and self.stride == other.stride
-            and self.index_array.shape == other.index_array.shape
+            and self.shape == other.shape
             and bool(np.array_equal(self.index_array, other.index_array))
         )
 

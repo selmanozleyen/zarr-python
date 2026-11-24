@@ -32,8 +32,6 @@ if TYPE_CHECKING:
 
 SelectionMode = Literal["basic", "orthogonal", "vectorized"]
 
-_INTERVALS_NEED_OINDEX = "Intervals select along one axis; use .oindex"
-
 
 def _as_index_array(sel: Any) -> np.ndarray[Any, np.dtype[Any]] | None:
     """Return `sel` as an ndarray if it is array-like, else None."""
@@ -142,8 +140,8 @@ def _expanded_axis_walk(entries: tuple[Any, ...], ndim: int, mode: SelectionMode
                 "boolean scalars are not valid indices; use a boolean array "
                 "matching the shape of the axes it selects"
             )
-        if mode != "orthogonal" and isinstance(sel, Intervals):
-            raise IndexError(_INTERVALS_NEED_OINDEX)
+        if mode == "vectorized" and isinstance(sel, Intervals):
+            raise IndexError("Intervals select along one axis; use .oindex")
     if sum(1 for sel in entries if sel is Ellipsis) > 1:
         raise IndexError("an index can only have a single ellipsis ('...')")
     consumed = sum(_axes_consumed(sel, mode) for sel in entries if sel is not Ellipsis)
