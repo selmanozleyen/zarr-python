@@ -711,6 +711,13 @@ def _strided_set(
     )
 
 
+def _check_extremes(dg: DimensionGridLike, low: int, high: int) -> None:
+    """Look up the extreme coordinates one at a time first: a grid's scalar error
+    names the offending coordinate, where the vectorized one reports a range."""
+    dg.index_to_chunk(low)
+    dg.index_to_chunk(high)
+
+
 def _indexed_set(out_dim: int, m: ArrayMap, dg: DimensionGridLike) -> IndexedSet:
     dependent = m.dependent_axis
     if dependent is None:
@@ -724,11 +731,7 @@ def _indexed_set(out_dim: int, m: ArrayMap, dg: DimensionGridLike) -> IndexedSet
     flat = m.index_array.reshape(-1)
     n = int(flat.size)
     storage = checked_affine(m.offset, m.stride, flat)
-    # Probe the extreme coordinates with the scalar lookup first: a grid's
-    # scalar error names the offending coordinate, where the vectorized one
-    # reports a range.
-    dg.index_to_chunk(int(storage.min()))
-    dg.index_to_chunk(int(storage.max()))
+    _check_extremes(dg, int(storage.min()), int(storage.max()))
     chunk_ids = dg.indices_to_chunks(storage)
     positions = _group_by_key(chunk_ids)
     if positions is None:
@@ -797,9 +800,7 @@ def _interval_set(out_dim: int, m: IntervalArrayMap, dg: DimensionGridLike) -> I
     starts = checked_affine(m.offset, 1, m.intervals.lo)
     stops = checked_affine(m.offset, 1, m.intervals.hi)
     position = np.cumsum(lengths) - lengths
-    # As in `_indexed_set`: the scalar lookup's error names the coordinate.
-    dg.index_to_chunk(int(starts.min()))
-    dg.index_to_chunk(int((stops - 1).max()))
+    _check_extremes(dg, int(starts.min()), int((stops - 1).max()))
     first = dg.indices_to_chunks(starts)
     count = dg.indices_to_chunks(stops - 1) - first + 1
     # One piece per (interval, chunk it crosses), in request order.
@@ -813,7 +814,7 @@ def _interval_set(out_dim: int, m: IntervalArrayMap, dg: DimensionGridLike) -> I
     counts = np.bincount(inverse, minlength=unique.size)
     return IntervalSet(
         output_dimension=out_dim,
-        input_dimension=m.dependency_axes[0],
+        input_dimension=m.axis,
         chunk=np.asarray(unique, dtype=np.intp),
         chunk_start=unique_start,
         chunk_extent=unique_extent,

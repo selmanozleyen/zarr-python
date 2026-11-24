@@ -1,4 +1,4 @@
-"""`Intervals`: select runs of consecutive indices along one axis, stored as runs."""
+"""The `Intervals` selector, and the `ArrayMap` subclass that stores it as intervals."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from zarr_indexing._affine import checked_affine
-from zarr_indexing.output_map import ArrayMap
+from zarr_indexing.output_map import ArrayMap, frozen_copy
 
 if TYPE_CHECKING:
     import numpy.typing as npt
@@ -54,7 +54,7 @@ class Intervals:
                 f"and {hi_array.shape}"
             )
         for name, array in (("lo", lo_array), ("hi", hi_array)):
-            if array.size and not np.issubdtype(array.dtype, np.integer):
+            if array.size > 0 and not np.issubdtype(array.dtype, np.integer):
                 raise TypeError(f"{name} must have an integer dtype, got {array.dtype}")
         lo_array, hi_array = checked_affine(0, 1, lo_array), checked_affine(0, 1, hi_array)
         if (hi_array < lo_array).any():
@@ -74,9 +74,8 @@ class Intervals:
         head[1:] = lo_array[1:] != hi_array[:-1]
         tail = np.ones(lo_array.size, dtype=bool)
         tail[:-1] = head[1:]
-        # Boolean indexing copies, so the caller's arrays are not kept.
-        object.__setattr__(self, "lo", _read_only(lo_array[head]))
-        object.__setattr__(self, "hi", _read_only(hi_array[tail]))
+        object.__setattr__(self, "lo", frozen_copy(lo_array[head]))
+        object.__setattr__(self, "hi", frozen_copy(hi_array[tail]))
         object.__setattr__(self, "size", size)
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -85,6 +84,14 @@ class Intervals:
     def __reduce__(self) -> tuple[object, tuple[object, object]]:
         """Rebuild through `__init__`, so a copy is read-only too."""
         return (Intervals, (self.lo, self.hi))
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Intervals):
+            return NotImplemented
+        return bool(np.array_equal(self.lo, other.lo) and np.array_equal(self.hi, other.hi))
+
+    def __hash__(self) -> int:
+        return hash((self.lo.tobytes(), self.hi.tobytes()))
 
     def __repr__(self) -> str:
         return f"Intervals(lo={self.lo.tolist()}, hi={self.hi.tolist()})"
@@ -105,13 +112,11 @@ def concat_ranges(lo: npt.NDArray[np.intp], hi: npt.NDArray[np.intp]) -> npt.NDA
     return starts + np.arange(starts.size, dtype=np.intp)
 
 
-def _read_only(array: npt.NDArray[np.intp]) -> npt.NDArray[np.intp]:
-    """`array` behind a read-only buffer, so its WRITEABLE flag cannot be re-enabled.
-
-    Only for arrays nothing else holds: it does not copy.
-    """
-    view = memoryview(np.ascontiguousarray(array)).toreadonly()
-    return np.frombuffer(view, dtype=np.intp).reshape(array.shape)
+def index_extremes(m: ArrayMap) -> tuple[int, int]:
+    """The smallest and largest entry of a non-empty map's index array, without building it."""
+    if isinstance(m, IntervalArrayMap):
+        return int(m.intervals.lo.min()), int(m.intervals.hi.max()) - 1
+    return int(m.index_array.min()), int(m.index_array.max())
 
 
 class IntervalArrayMap(ArrayMap):
@@ -122,10 +127,13 @@ class IntervalArrayMap(ArrayMap):
     time an operation asks for it. Chunk planning and pickling use the intervals.
     """
 
-    __slots__ = ("_index_array", "_shape", "intervals")
+    __slots__ = ("_index_array", "_shape", "axis", "intervals")
 
     intervals: Intervals
     """The selected indices, as intervals."""
+
+    axis: int
+    """The input axis the indices vary along."""
 
     _shape: tuple[int, ...]
     _index_array: npt.NDArray[np.intp] | None
@@ -135,10 +143,14 @@ class IntervalArrayMap(ArrayMap):
     ) -> None:
         shape = (1,) * axis + (intervals.size,) + (1,) * (ndim - axis - 1)
         object.__setattr__(self, "intervals", intervals)
+        object.__setattr__(self, "axis", axis)
         object.__setattr__(self, "_shape", shape)
         object.__setattr__(self, "offset", offset)
         object.__setattr__(self, "stride", stride)
         object.__setattr__(self, "_index_array", None)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("IntervalArrayMap is immutable")
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -150,23 +162,18 @@ class IntervalArrayMap(ArrayMap):
         """The full index array, built on first use."""
         values = self._index_array
         if values is None:
-            values = _read_only(self.intervals.indices().reshape(self._shape))
+            values = frozen_copy(self.intervals.indices().reshape(self._shape))
             object.__setattr__(self, "_index_array", values)
         return values
 
     def _with_affine(self, offset: int, stride: int) -> ArrayMap:
         """The same intervals under a different affine adjustment, still stored as intervals."""
-        return IntervalArrayMap(
-            self.intervals, self.dependency_axes[0], len(self._shape), offset, stride
-        )
+        return IntervalArrayMap(self.intervals, self.axis, len(self._shape), offset, stride)
 
     def __reduce__(self) -> tuple[object, tuple[object, ...]]:  # type: ignore[override]
         """Pickle the intervals, not the index array."""
-        axis = self.dependency_axes[0]
-        return (
-            IntervalArrayMap,
-            (self.intervals, axis, len(self._shape), self.offset, self.stride),
-        )
+        args = (self.intervals, self.axis, len(self._shape), self.offset, self.stride)
+        return (IntervalArrayMap, args)
 
     def __repr__(self) -> str:
         return (

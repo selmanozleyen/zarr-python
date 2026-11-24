@@ -30,9 +30,22 @@ def r_(lo: list[int], hi: list[int]) -> np.ndarray[Any, Any]:
     return np.concatenate(pieces).astype(np.intp) if pieces else np.empty(0, dtype=np.intp)
 
 
+@pytest.fixture
+def no_full_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail if anything lists every selected index."""
+
+    def fail(self: object) -> np.ndarray[Any, Any]:
+        raise AssertionError("built the full index array")
+
+    monkeypatch.setattr(Intervals, "indices", fail)
+    monkeypatch.setattr(IntervalArrayMap, "index_array", property(fail))
+
+
 def test_indices_are_np_r() -> None:
     assert Intervals([5, 0, 3, 3], [8, 2, 3, 4]).indices().tolist() == [5, 6, 7, 0, 1, 3]
     assert Intervals([], []).indices().tolist() == []
+    assert Intervals([1, 5], [3, 9]) == Intervals([1, 5], [3, 9]) != Intervals([1], [3])
+    assert hash(Intervals([1, 3], [3, 4])) == hash(Intervals([1], [4]))  # touching merged
     assert repr(Intervals([3, 1], [3, 3])) == "Intervals(lo=[1], hi=[3])"  # empty ones dropped
     assert (
         repr(Intervals([0, 2, 5], [2, 4, 7])) == "Intervals(lo=[0, 5], hi=[4, 7])"
@@ -125,11 +138,8 @@ def test_same_map_as_the_index_list() -> None:
     assert pickle.loads(pickle.dumps(by_intervals)) == by_list
 
 
-def test_pickle_and_copy_keep_intervals(monkeypatch: pytest.MonkeyPatch) -> None:
-    def indices(self: Intervals) -> np.ndarray[Any, Any]:
-        raise AssertionError("built the full index array")
-
-    monkeypatch.setattr(Intervals, "indices", indices)
+@pytest.mark.usefixtures("no_full_list")
+def test_pickle_and_copy_keep_intervals() -> None:
     n = 10**12
     transform = IndexTransform.from_shape((n,)).oindex[Intervals([0, n - 10**9], [10**9, n])]
     data = pickle.dumps(transform)
@@ -156,6 +166,11 @@ def test_intervals_cannot_change_after_selecting() -> None:
         selector.hi.flags.writeable = True
     with pytest.raises(AttributeError, match="immutable"):
         selector.hi = np.array([4, 10])
+    m = transform.output[0]
+    with pytest.raises(AttributeError, match="immutable"):
+        m.intervals = selector  # type: ignore[misc]
+    with pytest.raises(ValueError, match="WRITEABLE"):
+        m.index_array.flags.writeable = True
     assert transform == IndexTransform.from_shape((20,)).oindex[r_([1, 9], [4, 12])]
 
 
@@ -201,7 +216,7 @@ def test_two_dimensional_oindex_array_still_raises() -> None:
     [
         (lambda v, t: v.oindex[Intervals([8], [11])], IndexError, "intervals out of bounds"),
         (lambda v, t: v.oindex[Intervals([-3], [-1])], IndexError, "intervals out of bounds"),
-        (lambda v, t: v[Intervals([1], [3])], IndexError, "oindex"),
+        (lambda v, t: v[Intervals([1], [3])], IndexError, "unsupported selection type"),
         (lambda v, t: v.vindex[Intervals([1], [3])], IndexError, "oindex"),
         (lambda v, t: t.oindex[Intervals([8], [11])], BoundsCheckError, "out of bounds"),
         (lambda v, t: t.vindex[Intervals([1], [3])], IndexError, "oindex"),
@@ -223,9 +238,8 @@ def test_errors(select: Any, error: type[Exception], match: str) -> None:
         select(view, IndexTransform.from_shape((10,)))
 
 
-def test_planning_and_reading_never_build_the_index_array(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+@pytest.mark.usefixtures("no_full_list")
+def test_planning_reading_and_bounds_never_build_the_index_array() -> None:
     source = np.arange(40 * 3).reshape(40, 3)
     view = (
         LazyArray.from_numpy(source)
@@ -233,12 +247,21 @@ def test_planning_and_reading_never_build_the_index_array(
         .oindex[Intervals([30, 2, 10], [34, 8, 15]), :]
     )
     assert isinstance(view.transform.output[0], IntervalArrayMap)
-
-    def indices(self: Intervals) -> np.ndarray[Any, Any]:
-        raise AssertionError("built the full index array")
-
-    monkeypatch.setattr(Intervals, "indices", indices)
     np.testing.assert_array_equal(view.result(), source[r_([30, 2, 10], [34, 8, 15])])
+    assert view.bounding_box() == ((2, 34), (0, 3))
+
+
+def test_pieces_keep_request_order_within_a_chunk() -> None:
+    # 300 one-index intervals alternating between two chunks.
+    lo = np.arange(300) % 2 * 8 + np.arange(300) // 2 % 8
+    transform = IndexTransform.from_shape((16,)).oindex[Intervals(lo, lo + 1)]
+    (axis,) = (
+        plan_chunks(transform, dimension_grids_from_chunks((8,), shape=(16,))).partition().sets
+    )
+    assert isinstance(axis, IntervalSet)
+    for row in range(len(axis)):
+        origins = axis.origin[axis.run(row)]
+        assert (np.diff(origins) > 0).all()
 
 
 @pytest.mark.parametrize(("offset", "coordinate"), [(15, 26), (-5, -4)], ids=["above", "below"])

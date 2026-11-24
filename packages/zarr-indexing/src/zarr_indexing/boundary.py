@@ -142,6 +142,8 @@ def _expanded_axis_walk(entries: tuple[Any, ...], ndim: int, mode: SelectionMode
                 "boolean scalars are not valid indices; use a boolean array "
                 "matching the shape of the axes it selects"
             )
+        if mode != "orthogonal" and isinstance(sel, Intervals):
+            raise IndexError(_INTERVALS_NEED_OINDEX)
     if sum(1 for sel in entries if sel is Ellipsis) > 1:
         raise IndexError("an index can only have a single ellipsis ('...')")
     consumed = sum(_axes_consumed(sel, mode) for sel in entries if sel is not Ellipsis)
@@ -174,8 +176,6 @@ def validate_advanced_selection(
     axes = _expanded_axis_walk(entries, domain.ndim, mode)
 
     for sel, axis in zip(entries, axes, strict=True):
-        if mode == "vectorized" and isinstance(sel, Intervals):
-            raise IndexError(_INTERVALS_NEED_OINDEX)
         arr = _as_index_array(sel)
         if arr is None:
             continue
@@ -370,9 +370,7 @@ def normalize_positional_selection(
         if arr is not None:
             result.append(_normalize_int_array(arr, size, axis) + origin[axis])
         elif isinstance(sel, Intervals):
-            if mode != "orthogonal":
-                raise IndexError(_INTERVALS_NEED_OINDEX)
-            if sel.size and (int(sel.lo.min()) < 0 or int(sel.hi.max()) > size):
+            if sel.size > 0 and (int(sel.lo.min()) < 0 or int(sel.hi.max()) > size):
                 raise IndexError(f"intervals out of bounds for axis {axis} with size {size}")
             result.append(sel.shifted(origin[axis]))
         elif isinstance(sel, slice):

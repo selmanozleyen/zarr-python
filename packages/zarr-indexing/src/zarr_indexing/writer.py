@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from zarr_indexing.chunk_resolution import plan_chunks
+from zarr_indexing.intervals import index_extremes
 from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap
 
 if TYPE_CHECKING:
@@ -86,8 +87,7 @@ def write_into(
                 first = transform.domain.inclusive_min[axis]
                 last = transform.domain.exclusive_max[axis] - 1
             else:
-                first = int(output.index_array.min())
-                last = int(output.index_array.max())
+                first, last = index_extremes(output)
             endpoints = (
                 output.offset + output.stride * first,
                 output.offset + output.stride * last,

@@ -50,6 +50,11 @@ if TYPE_CHECKING:
     from zarr_indexing.json import OutputIndexMapJSON
 
 
+def frozen_copy(array: npt.NDArray[np.intp]) -> npt.NDArray[np.intp]:
+    """A copy of `array` over immutable bytes, so its WRITEABLE flag cannot be re-enabled."""
+    return np.frombuffer(array.tobytes(), dtype=np.intp).reshape(array.shape)
+
+
 def _array_map_dependency_axes(shape: tuple[int, ...]) -> tuple[int, ...]:
     """Return the input axes on which a normalized index array varies.
 
@@ -208,7 +213,7 @@ class ArrayMap:
         if not np.issubdtype(array.dtype, np.integer):
             raise TypeError(f"index_array must have an integer dtype, got {array.dtype}")
         normalized = checked_affine(0, 1, array)
-        frozen = np.frombuffer(normalized.tobytes(), dtype=np.intp).reshape(normalized.shape)
+        frozen = frozen_copy(normalized)
         object.__setattr__(self, "index_array", frozen)
 
     def __reduce__(self) -> tuple[object, tuple[object, int, int]]:
