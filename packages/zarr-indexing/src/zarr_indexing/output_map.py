@@ -50,7 +50,12 @@ if TYPE_CHECKING:
     from zarr_indexing.json import OutputIndexMapJSON
 
 
-def _array_map_dependency_axes(index_array: np.ndarray[Any, Any]) -> tuple[int, ...]:
+def frozen_copy(array: npt.NDArray[np.intp]) -> npt.NDArray[np.intp]:
+    """A copy of `array` over immutable bytes, so its WRITEABLE flag cannot be re-enabled."""
+    return np.frombuffer(array.tobytes(), dtype=np.intp).reshape(array.shape)
+
+
+def _array_map_dependency_axes(shape: tuple[int, ...]) -> tuple[int, ...]:
     """Return the input axes on which a normalized index array varies.
 
     Normalized `ArrayMap` index arrays carry the full input rank of their
@@ -61,7 +66,7 @@ def _array_map_dependency_axes(index_array: np.ndarray[Any, Any]) -> tuple[int, 
     with shape `(0, 2)` is empty but still reports axis 1; the zero-size axis
     itself is not reported.
     """
-    return tuple(axis for axis, size in enumerate(index_array.shape) if size > 1)
+    return tuple(axis for axis, size in enumerate(shape) if size > 1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,7 +213,7 @@ class ArrayMap:
         if not np.issubdtype(array.dtype, np.integer):
             raise TypeError(f"index_array must have an integer dtype, got {array.dtype}")
         normalized = checked_affine(0, 1, array)
-        frozen = np.frombuffer(normalized.tobytes(), dtype=np.intp).reshape(normalized.shape)
+        frozen = frozen_copy(normalized)
         object.__setattr__(self, "index_array", frozen)
 
     def __reduce__(self) -> tuple[object, tuple[object, int, int]]:
@@ -239,7 +244,7 @@ class ArrayMap:
         return (
             self.offset == other.offset
             and self.stride == other.stride
-            and self.index_array.shape == other.index_array.shape
+            and self.shape == other.shape
             and bool(np.array_equal(self.index_array, other.index_array))
         )
 
@@ -258,6 +263,11 @@ class ArrayMap:
         )
 
     @property
+    def shape(self) -> tuple[int, ...]:
+        """The index array's shape: full-sized on the dependency axes, 1 elsewhere."""
+        return self.index_array.shape
+
+    @property
     def dependency_axes(self) -> tuple[int, ...]:
         """Structural dependency axes: axes of size greater than one.
 
@@ -273,7 +283,7 @@ class ArrayMap:
         >>> ArrayMap(index_array=np.array([[1, 2], [3, 4]])).dependency_axes
         (0, 1)
         """
-        return _array_map_dependency_axes(self.index_array)
+        return _array_map_dependency_axes(self.shape)
 
     @property
     def dependent_axis(self) -> int | None:

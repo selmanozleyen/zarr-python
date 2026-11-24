@@ -639,6 +639,10 @@ class TestBasicIndexingOnArrayMaps:
 
 
 class TestIndexTransformOindex:
+    def test_two_dimensional_array_raises(self) -> None:
+        with pytest.raises(ValueError, match="neither 1 nor"):
+            IndexTransform.from_shape((10, 3)).oindex[np.array([[1, 2]]), :]
+
     def test_oindex_int_array(self) -> None:
         t = IndexTransform.from_shape((10, 20))
         idx = np.array([1, 3, 5], dtype=np.intp)

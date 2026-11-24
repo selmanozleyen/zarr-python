@@ -170,6 +170,7 @@ from zarr_indexing.chunk_resolution import (
 from zarr_indexing.domain import IndexDomain
 from zarr_indexing.errors import BoundsCheckError
 from zarr_indexing.grid import DimensionGrid, FixedDimension, dimension_grids_from_chunks
+from zarr_indexing.intervals import index_extremes
 from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap
 from zarr_indexing.reader import (
     ReadContext,
@@ -813,8 +814,8 @@ class LazyArray:
                 last = m.offset + m.stride * (domain.exclusive_max[d] - 1)
                 bounds.append((min(first, last), max(first, last) + 1))
             else:
-                coords = m.offset + m.stride * m.index_array
-                bounds.append((int(coords.min()), int(coords.max()) + 1))
+                ends = [m.offset + m.stride * e for e in index_extremes(m)]
+                bounds.append((min(ends), max(ends) + 1))
         return tuple(bounds)
 
     def strides(self) -> tuple[int, ...] | None:

@@ -436,6 +436,20 @@ output coordinate space. The canonical row selection has a one-dimensional
 request and a two-dimensional source, so its paired projections have request
 rank one and source rank two.
 
+### Runs of indices: `Intervals`
+
+`Intervals(lo, hi)` in `.oindex` selects the half-open runs `[lo[i], hi[i])` in
+order, what `np.r_[lo[0]:hi[0], ...]` selects, without listing every index.
+Chunk planning, reading, `bounding_box()`, `repr`, shifting or composing onto
+an affine window, and pickling use the intervals directly. Anything else builds
+the full list: comparing, hashing, JSON, a further selection, `.vindex` arrays
+beside the intervals, selecting on a strided or reversed view, and writing into
+a NumPy array:
+
+```python
+--8<-- "snippets/intervals.py:intervals"
+```
+
 ### Order and duplicates need the request-side projection
 
 Orthogonal indexing (`.oindex`) applies each axis's indexer
@@ -514,10 +528,12 @@ the second row on both of its transforms:
 --8<-- "snippets/grid_partition.py:strided-tables"
 ```
 
-There are three kinds of table, matching the three map kinds and the one
-arrangement that does not factor. A `StridedSet` holds a `ConstantMap` or
-`DimensionMap` axis; an `IndexedSet` holds an orthogonal `ArrayMap` axis
-(`.oindex`) with its coordinates grouped by chunk; and each `JointSet` holds one connected group of index arrays. Arrays
+There are four kinds of table: one per map kind, one for intervals, and one
+for the arrangement that does not factor. A `StridedSet`
+holds a `ConstantMap` or `DimensionMap` axis; an `IndexedSet` holds an
+orthogonal `ArrayMap` axis (`.oindex`) with its coordinates grouped by chunk;
+an `IntervalSet` holds an axis selected with `Intervals`, as the intervals
+split at chunk boundaries; and each `JointSet` holds one connected group of index arrays. Arrays
 sharing request axes are sorted together; independent groups are separate
 tables in `joint_sets`. Singleton broadcast axes retain this independence. The
 [API reference](../api/chunk_resolution.md) documents every column.

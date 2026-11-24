@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 
 from zarr_indexing._selector import as_scalar_index, is_bool_scalar, require_index
+from zarr_indexing.intervals import Intervals
 
 if TYPE_CHECKING:
     from zarr_indexing.domain import IndexDomain
@@ -139,6 +140,8 @@ def _expanded_axis_walk(entries: tuple[Any, ...], ndim: int, mode: SelectionMode
                 "boolean scalars are not valid indices; use a boolean array "
                 "matching the shape of the axes it selects"
             )
+        if mode == "vectorized" and isinstance(sel, Intervals):
+            raise IndexError("Intervals select along one axis; use .oindex")
     if sum(1 for sel in entries if sel is Ellipsis) > 1:
         raise IndexError("an index can only have a single ellipsis ('...')")
     consumed = sum(_axes_consumed(sel, mode) for sel in entries if sel is not Ellipsis)
@@ -364,6 +367,10 @@ def normalize_positional_selection(
         size = shape[axis]
         if arr is not None:
             result.append(_normalize_int_array(arr, size, axis) + origin[axis])
+        elif isinstance(sel, Intervals):
+            if sel.size > 0 and (int(sel.lo.min()) < 0 or int(sel.hi.max()) > size):
+                raise IndexError(f"intervals out of bounds for axis {axis} with size {size}")
+            result.append(sel.shifted(origin[axis]))
         elif isinstance(sel, slice):
             start, stop, step = _normalize_slice(sel, size, axis)
             result.append(slice(start + origin[axis], stop + origin[axis], step))
