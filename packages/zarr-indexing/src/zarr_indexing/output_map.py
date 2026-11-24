@@ -37,7 +37,7 @@ them by chunk, when `DimensionMap` does it with three integers.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -47,6 +47,7 @@ from zarr_indexing._affine import checked_affine
 if TYPE_CHECKING:
     import numpy.typing as npt
 
+    from zarr_indexing.intervals import Intervals
     from zarr_indexing.json import OutputIndexMapJSON
 
 
@@ -198,6 +199,38 @@ class ArrayMap:
     stride: int = 1
     """Multiplier applied to each `index_array` value before `offset` is added."""
 
+    # Set only by `_from_intervals`, for an `Intervals` selection: the index
+    # array as intervals along one axis, and its shape. `index_array` is then
+    # built on first read. Derived state, as `IndexDomain._shape`: excluded
+    # from init, repr, eq and hash, so `dataclasses.replace` gives a plain map.
+    _intervals: Intervals | None = field(default=None, init=False, repr=False, compare=False)
+    _shape: tuple[int, ...] | None = field(default=None, init=False, repr=False, compare=False)
+
+    @classmethod
+    def _from_intervals(
+        cls, intervals: Intervals, shape: tuple[int, ...], offset: int, stride: int
+    ) -> ArrayMap:
+        """The map of `intervals.indices()` in `shape`, stored as intervals.
+
+        Leaves the `index_array` slot unset; `__getattr__` builds it."""
+        new = object.__new__(cls)
+        object.__setattr__(new, "offset", offset)
+        object.__setattr__(new, "stride", stride)
+        object.__setattr__(new, "_intervals", intervals)
+        object.__setattr__(new, "_shape", shape)
+        return new
+
+    if not TYPE_CHECKING:  # a typed `__getattr__` would hide misspelled attributes
+
+        def __getattr__(self, name: str) -> Any:
+            # Reached only for an unset slot: `index_array` of a map from
+            # `_from_intervals`, before its first read.
+            if name != "index_array":
+                raise AttributeError(name)
+            values = frozen_copy(self._intervals.indices().reshape(self._shape))
+            object.__setattr__(self, "index_array", values)
+            return values
+
     def __post_init__(self) -> None:
         """Own an immutable snapshot of the integer index coordinates.
 
@@ -216,8 +249,13 @@ class ArrayMap:
         frozen = frozen_copy(normalized)
         object.__setattr__(self, "index_array", frozen)
 
-    def __reduce__(self) -> tuple[object, tuple[object, int, int]]:
-        """Reconstruct through `__init__`, preserving the ownership invariant."""
+    def __reduce__(self) -> tuple[object, tuple[object, ...]]:
+        """Reconstruct through `__init__`, preserving the ownership invariant.
+
+        A map stored as intervals pickles as its intervals."""
+        if self._intervals is not None:
+            args = (self._intervals, self._shape, self.offset, self.stride)
+            return (ArrayMap._from_intervals, args)
         return (
             type(self),
             (self.index_array, self.offset, self.stride),
@@ -228,11 +266,26 @@ class ArrayMap:
 
         Share the immutable index array while replacing the offset and stride.
         This preserves coordinate ownership without copying the array."""
+        if self._intervals is not None:
+            return ArrayMap._from_intervals(self._intervals, self.shape, offset, stride)
         new = object.__new__(ArrayMap)
         object.__setattr__(new, "index_array", self.index_array)
         object.__setattr__(new, "offset", offset)
         object.__setattr__(new, "stride", stride)
+        object.__setattr__(new, "_intervals", None)
+        object.__setattr__(new, "_shape", None)
         return new
+
+    def __repr__(self) -> str:
+        if self._intervals is not None:
+            return (
+                f"ArrayMap({self._intervals!r}, shape={self._shape}, "
+                f"offset={self.offset}, stride={self.stride})"
+            )
+        return (
+            f"ArrayMap(index_array={self.index_array!r}, offset={self.offset}, "
+            f"stride={self.stride})"
+        )
 
     def __eq__(self, other: object) -> bool:
         """Compare offset, stride, array shape, and index values.
@@ -265,7 +318,7 @@ class ArrayMap:
     @property
     def shape(self) -> tuple[int, ...]:
         """The index array's shape: full-sized on the dependency axes, 1 elsewhere."""
-        return self.index_array.shape
+        return self.index_array.shape if self._shape is None else self._shape
 
     @property
     def dependency_axes(self) -> tuple[int, ...]:

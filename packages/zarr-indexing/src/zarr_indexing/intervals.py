@@ -1,4 +1,4 @@
-"""The `Intervals` selector, and the `ArrayMap` subclass that stores it as intervals."""
+"""The `Intervals` selector."""
 
 from __future__ import annotations
 
@@ -7,10 +7,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from zarr_indexing._affine import checked_affine
-from zarr_indexing.output_map import ArrayMap, frozen_copy
+from zarr_indexing.output_map import frozen_copy
 
 if TYPE_CHECKING:
     import numpy.typing as npt
+
+    from zarr_indexing.output_map import ArrayMap
 
 __all__ = ["Intervals"]
 
@@ -114,69 +116,7 @@ def concat_ranges(lo: npt.NDArray[np.intp], hi: npt.NDArray[np.intp]) -> npt.NDA
 
 def index_extremes(m: ArrayMap) -> tuple[int, int]:
     """The smallest and largest entry of a non-empty map's index array, without building it."""
-    if isinstance(m, IntervalArrayMap):
-        return int(m.intervals.lo.min()), int(m.intervals.hi.max()) - 1
+    intervals = m._intervals  # pyright: ignore[reportPrivateUsage]
+    if intervals is not None:
+        return int(intervals.lo.min()), int(intervals.hi.max()) - 1
     return int(m.index_array.min()), int(m.index_array.max())
-
-
-class IntervalArrayMap(ArrayMap):
-    """An `ArrayMap` whose index array is `Intervals` along one input axis, stored as intervals.
-
-    It is the same map as the `ArrayMap` of `intervals.indices()`: it compares,
-    serializes and composes as that map, and builds the index array the first
-    time an operation asks for it. Chunk planning and pickling use the intervals.
-    """
-
-    __slots__ = ("_index_array", "_shape", "axis", "intervals")
-
-    intervals: Intervals
-    """The selected indices, as intervals."""
-
-    axis: int
-    """The input axis the indices vary along."""
-
-    _shape: tuple[int, ...]
-    _index_array: npt.NDArray[np.intp] | None
-
-    def __init__(
-        self, intervals: Intervals, axis: int, ndim: int, offset: int, stride: int
-    ) -> None:
-        shape = (1,) * axis + (intervals.size,) + (1,) * (ndim - axis - 1)
-        object.__setattr__(self, "intervals", intervals)
-        object.__setattr__(self, "axis", axis)
-        object.__setattr__(self, "_shape", shape)
-        object.__setattr__(self, "offset", offset)
-        object.__setattr__(self, "stride", stride)
-        object.__setattr__(self, "_index_array", None)
-
-    def __setattr__(self, name: str, value: object) -> None:
-        raise AttributeError("IntervalArrayMap is immutable")
-
-    @property
-    def shape(self) -> tuple[int, ...]:
-        """The index array's shape, known without building it."""
-        return self._shape
-
-    @property
-    def index_array(self) -> npt.NDArray[np.intp]:  # type: ignore[override]
-        """The full index array, built on first use."""
-        values = self._index_array
-        if values is None:
-            values = frozen_copy(self.intervals.indices().reshape(self._shape))
-            object.__setattr__(self, "_index_array", values)
-        return values
-
-    def _with_affine(self, offset: int, stride: int) -> ArrayMap:
-        """The same intervals under a different affine adjustment, still stored as intervals."""
-        return IntervalArrayMap(self.intervals, self.axis, len(self._shape), offset, stride)
-
-    def __reduce__(self) -> tuple[object, tuple[object, ...]]:  # type: ignore[override]
-        """Pickle the intervals, not the index array."""
-        args = (self.intervals, self.axis, len(self._shape), self.offset, self.stride)
-        return (IntervalArrayMap, args)
-
-    def __repr__(self) -> str:
-        return (
-            f"IntervalArrayMap({self.intervals!r}, shape={self._shape}, "
-            f"offset={self.offset}, stride={self.stride})"
-        )
