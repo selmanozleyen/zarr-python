@@ -164,7 +164,7 @@ def _compose_dimension(outer: IndexTransform, inner_map: DimensionMap) -> Output
 
     # outer_map: ArrayMap (OutputIndexMap = ConstantMap | DimensionMap | ArrayMap)
     # Affine post-composition leaves the index array (and hence its full
-    # input rank and dependency axes) untouched; a subclass keeps its storage.
+    # input rank and dependency axes) untouched; a map stored as intervals keeps them.
     return outer_map._with_affine(  # pyright: ignore[reportPrivateUsage]
         offset_i + stride_i * outer_map.offset, stride_i * outer_map.stride
     )

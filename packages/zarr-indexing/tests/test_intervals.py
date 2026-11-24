@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import pickle
 from typing import Any
 
@@ -10,6 +11,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from zarr_indexing import (
+    ArrayMap,
     BoundsCheckError,
     ConstantMap,
     DimensionMap,
@@ -21,7 +23,6 @@ from zarr_indexing import (
     plan_chunks,
 )
 from zarr_indexing.grid import dimension_grids_from_chunks
-from zarr_indexing.intervals import IntervalArrayMap
 from zarr_indexing.writer import write_into
 
 
@@ -38,8 +39,17 @@ def no_full_list(monkeypatch: pytest.MonkeyPatch) -> None:
     def fail(self: object) -> np.ndarray[Any, Any]:
         raise AssertionError("built the full index array")
 
+    def unset_slot(self: object, name: str) -> object:
+        if name == "index_array":
+            fail(self)
+        raise AttributeError(name)
+
     monkeypatch.setattr(Intervals, "indices", fail)
-    monkeypatch.setattr(IntervalArrayMap, "index_array", property(fail))
+    monkeypatch.setattr(ArrayMap, "__getattr__", unset_slot)
+
+
+def stored_as_intervals(m: object) -> bool:
+    return isinstance(m, ArrayMap) and m._intervals is not None  # pyright: ignore[reportPrivateUsage]
 
 
 def test_indices_are_np_r() -> None:
@@ -149,15 +159,21 @@ def test_pickle_and_copy_keep_intervals() -> None:
     data = pickle.dumps(transform)
     assert len(data) < 2000
     restored = pickle.loads(data).output[0]
-    assert isinstance(restored, IntervalArrayMap)
-    assert "IntervalArrayMap(Intervals(" in repr(restored)
+    assert stored_as_intervals(restored)
+    assert "ArrayMap(Intervals(" in repr(restored)
     assert "array(2000000000)" in transform.selection_repr
-    for selector in (
-        pickle.loads(pickle.dumps(restored.intervals)),
-        copy.deepcopy(restored.intervals),
-    ):
+    intervals = restored._intervals  # pyright: ignore[reportPrivateUsage]
+    for selector in (pickle.loads(pickle.dumps(intervals)), copy.deepcopy(intervals)):
         with pytest.raises(ValueError, match="read-only"):
             selector.hi[0] = 1
+
+
+def test_replace_gives_the_plain_map() -> None:
+    m = IndexTransform.from_shape((20,)).oindex[Intervals([1, 9], [4, 12])].output[0]
+    assert isinstance(m, ArrayMap)
+    moved = dataclasses.replace(m, offset=3)
+    assert not stored_as_intervals(moved)
+    assert moved == ArrayMap(r_([1, 9], [4, 12]), offset=3)
 
 
 def test_intervals_cannot_change_after_selecting() -> None:
@@ -172,8 +188,8 @@ def test_intervals_cannot_change_after_selecting() -> None:
     with pytest.raises(AttributeError, match="immutable"):
         selector.hi = np.array([4, 10])
     m = transform.output[0]
-    with pytest.raises(AttributeError, match="immutable"):
-        m.intervals = selector  # type: ignore[misc]
+    with pytest.raises(AttributeError, match="cannot assign"):
+        m._intervals = selector  # type: ignore[misc]  # pyright: ignore[reportPrivateUsage]
     with pytest.raises(ValueError, match="WRITEABLE"):
         m.index_array.flags.writeable = True
     assert transform == IndexTransform.from_shape((20,)).oindex[r_([1, 9], [4, 12])]
@@ -245,12 +261,12 @@ def test_planning_reading_and_bounds_never_build_the_index_array() -> None:
         .with_parts((8, 3))
         .oindex[Intervals([30, 2, 10], [34, 8, 15]), :]
     )
-    assert isinstance(view.transform.output[0], IntervalArrayMap)
+    assert stored_as_intervals(view.transform.output[0])
     np.testing.assert_array_equal(view.result(), source[r_([30, 2, 10], [34, 8, 15])])
     assert view.bounding_box() == ((2, 34), (0, 3))
     assert "array(15)" in repr(view)
     window = view.transform.compose(IndexTransform.from_shape((40, 3)).translate((5, 0)))
-    assert isinstance(window.output[0], IntervalArrayMap)
+    assert stored_as_intervals(window.output[0])
 
 
 @pytest.mark.usefixtures("no_full_list")
@@ -338,7 +354,7 @@ def test_plan_maps_every_cell_like_the_index_list(shift: Any, chunks: Any) -> No
     lo, hi = [9, 1, 4, 13], [12, 3, 8, 13]
     transform = shift(IndexTransform.from_shape((20,)).oindex[Intervals(lo, hi)])
     expected = shift(IndexTransform.from_shape((20,)).oindex[r_(lo, hi)])
-    assert isinstance(transform.output[0], IntervalArrayMap)
+    assert stored_as_intervals(transform.output[0])
     grids = dimension_grids_from_chunks(chunks, shape=(25,))
     mapped: dict[int, int] = {}
     planned = 0

@@ -40,7 +40,7 @@ from zarr_indexing._selector import as_scalar_index, require_index
 from zarr_indexing.boundary import validate_advanced_selection
 from zarr_indexing.domain import IndexDomain
 from zarr_indexing.errors import BoundsCheckError, VindexInvalidSelectionError
-from zarr_indexing.intervals import IntervalArrayMap, Intervals
+from zarr_indexing.intervals import Intervals
 from zarr_indexing.output_map import (
     ArrayMap,
     ConstantMap,
@@ -1656,8 +1656,12 @@ def _apply_oindex(transform: IndexTransform, selection: Any) -> IndexTransform:
                 selected = dim_array[d]
                 if isinstance(selected, Intervals):
                     if selected.size > 1:
+                        shape = [1] * new_dim_idx
+                        shape[new_axis] = selected.size
                         new_output.append(
-                            IntervalArrayMap(selected, new_axis, new_dim_idx, m.offset, m.stride)
+                            ArrayMap._from_intervals(  # pyright: ignore[reportPrivateUsage]
+                                selected, tuple(shape), m.offset, m.stride
+                            )
                         )
                         continue
                     selected = selected.indices()

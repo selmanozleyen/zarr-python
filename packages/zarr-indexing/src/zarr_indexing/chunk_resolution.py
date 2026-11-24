@@ -49,7 +49,7 @@ import numpy as np
 
 from zarr_indexing._affine import checked_affine
 from zarr_indexing.domain import IndexDomain
-from zarr_indexing.intervals import IntervalArrayMap, concat_ranges
+from zarr_indexing.intervals import Intervals, concat_ranges
 from zarr_indexing.output_map import ArrayMap, ConstantMap, DimensionMap, OutputIndexMap
 from zarr_indexing.transform import (
     IndexTransform,
@@ -795,10 +795,12 @@ def _group_by_key(
     return np.asarray(order, dtype=np.intp)
 
 
-def _interval_set(out_dim: int, m: IntervalArrayMap, dg: DimensionGridLike) -> IntervalSet:
-    lengths = m.intervals.hi - m.intervals.lo
-    starts = checked_affine(m.offset, 1, m.intervals.lo)
-    stops = checked_affine(m.offset, 1, m.intervals.hi)
+def _interval_set(
+    out_dim: int, m: ArrayMap, intervals: Intervals, dg: DimensionGridLike
+) -> IntervalSet:
+    lengths = intervals.hi - intervals.lo
+    starts = checked_affine(m.offset, 1, intervals.lo)
+    stops = checked_affine(m.offset, 1, intervals.hi)
     position = np.cumsum(lengths) - lengths
     _check_extremes(dg, int(starts.min()), int((stops - 1).max()))
     first = dg.indices_to_chunks(starts)
@@ -814,7 +816,7 @@ def _interval_set(out_dim: int, m: IntervalArrayMap, dg: DimensionGridLike) -> I
     counts = np.bincount(inverse, minlength=unique.size)
     return IntervalSet(
         output_dimension=out_dim,
-        input_dimension=m.axis,
+        input_dimension=m.dependency_axes[0],
         chunk=np.asarray(unique, dtype=np.intp),
         chunk_start=unique_start,
         chunk_extent=unique_extent,
@@ -1335,8 +1337,9 @@ def _partition_transform(
         if isinstance(m, ArrayMap):
             if correlated:
                 continue
-            if isinstance(m, IntervalArrayMap) and m.stride == 1:
-                sets.append(_interval_set(out_dim, m, grids[out_dim]))
+            intervals = m._intervals  # pyright: ignore[reportPrivateUsage]
+            if intervals is not None and m.stride == 1:
+                sets.append(_interval_set(out_dim, m, intervals, grids[out_dim]))
             else:
                 sets.append(_indexed_set(out_dim, m, grids[out_dim]))
         else:
